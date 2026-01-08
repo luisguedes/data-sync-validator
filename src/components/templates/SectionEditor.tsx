@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, GripVertical, Trash2, Edit, Code, Settings, AlertCircle } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, GripVertical, Trash2, Edit, Code, Settings, AlertCircle, AlertTriangle } from 'lucide-react';
 import { TemplateSection, TemplateItem, ExpectedInput } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,6 +16,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import {
   DndContext,
   closestCenter,
@@ -48,6 +54,48 @@ interface SectionEditorProps {
   expectedInputs: ExpectedInput[];
 }
 
+export interface ItemValidationIssue {
+  type: 'error' | 'warning';
+  message: string;
+}
+
+export function validateItem(item: TemplateItem, expectedInputs: ExpectedInput[]): ItemValidationIssue[] {
+  const issues: ItemValidationIssue[] = [];
+
+  // Check for empty or invalid query
+  if (!item.query.trim()) {
+    issues.push({ type: 'error', message: 'Query SQL está vazia' });
+  } else if (!item.query.toUpperCase().trim().startsWith('SELECT')) {
+    issues.push({ type: 'error', message: 'Query deve começar com SELECT' });
+  }
+
+  // Check for missing binding when required
+  const needsBinding = ['number_equals_expected', 'number_matches_expected_with_tolerance'].includes(item.validationRule.type);
+  if (needsBinding && !item.expectedInputBinding) {
+    issues.push({ type: 'error', message: 'Binding de input esperado é obrigatório para esta regra de validação' });
+  }
+
+  // Check if binding references a valid expected input
+  if (item.expectedInputBinding) {
+    const bindingExists = expectedInputs.some(input => input.key === item.expectedInputBinding);
+    if (!bindingExists) {
+      issues.push({ type: 'error', message: `Input esperado "${item.expectedInputBinding}" não existe` });
+    }
+  }
+
+  // Warning for missing title
+  if (!item.title.trim()) {
+    issues.push({ type: 'warning', message: 'Item sem título' });
+  }
+
+  // Warning for missing description
+  if (!item.description.trim()) {
+    issues.push({ type: 'warning', message: 'Item sem descrição' });
+  }
+
+  return issues;
+}
+
 const validationLabels: Record<string, string> = {
   single_number_required: 'Número único',
   must_return_rows: 'Deve retornar linhas',
@@ -61,9 +109,10 @@ interface SortableItemRowProps {
   onEditItem: (item: TemplateItem) => void;
   onDeleteItem: (itemId: string) => void;
   getBindingLabel: (binding?: string) => string | null;
+  expectedInputs: ExpectedInput[];
 }
 
-function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel }: SortableItemRowProps) {
+function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel, expectedInputs }: SortableItemRowProps) {
   const {
     attributes,
     listeners,
@@ -78,13 +127,21 @@ function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel }: So
     transition,
   };
 
+  const issues = validateItem(item, expectedInputs);
+  const errors = issues.filter(i => i.type === 'error');
+  const warnings = issues.filter(i => i.type === 'warning');
+  const hasErrors = errors.length > 0;
+  const hasWarnings = warnings.length > 0;
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={cn(
         'flex items-start gap-3 p-3 rounded-lg border bg-background hover:bg-muted/30 transition-colors group',
-        isDragging && 'z-50 opacity-90 shadow-lg ring-2 ring-primary/20'
+        isDragging && 'z-50 opacity-90 shadow-lg ring-2 ring-primary/20',
+        hasErrors && 'border-destructive/50 bg-destructive/5',
+        !hasErrors && hasWarnings && 'border-yellow-500/50 bg-yellow-500/5'
       )}
     >
       <button
@@ -96,7 +153,7 @@ function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel }: So
       </button>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="font-medium">{item.title}</span>
+          <span className="font-medium">{item.title || <span className="text-muted-foreground italic">Sem título</span>}</span>
           <Badge variant="secondary" className="text-xs">
             {item.scope === 'global' ? 'Global' : 'Por Loja'}
           </Badge>
@@ -105,21 +162,65 @@ function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel }: So
               Auto-resolve
             </Badge>
           )}
+          {(hasErrors || hasWarnings) && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="flex items-center gap-1">
+                    {hasErrors && (
+                      <AlertCircle className="h-4 w-4 text-destructive" />
+                    )}
+                    {!hasErrors && hasWarnings && (
+                      <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                    )}
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent side="right" className="max-w-xs">
+                  <div className="space-y-1">
+                    {errors.map((issue, idx) => (
+                      <div key={idx} className="flex items-center gap-1 text-destructive">
+                        <AlertCircle className="h-3 w-3 flex-shrink-0" />
+                        <span className="text-xs">{issue.message}</span>
+                      </div>
+                    ))}
+                    {warnings.map((issue, idx) => (
+                      <div key={idx} className="flex items-center gap-1 text-yellow-600">
+                        <AlertTriangle className="h-3 w-3 flex-shrink-0" />
+                        <span className="text-xs">{issue.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
         </div>
-        <p className="text-sm text-muted-foreground line-clamp-1">{item.description}</p>
+        <p className="text-sm text-muted-foreground line-clamp-1">
+          {item.description || <span className="italic">Sem descrição</span>}
+        </p>
         
         <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
-          <div className="flex items-center gap-1 text-muted-foreground">
+          <div className={cn(
+            "flex items-center gap-1",
+            !item.query.trim() ? "text-destructive" : "text-muted-foreground"
+          )}>
             <Code className="h-3 w-3" />
-            <span className="font-mono truncate max-w-[200px]">{item.query.slice(0, 40)}...</span>
+            <span className="font-mono truncate max-w-[200px]">
+              {item.query.trim() ? `${item.query.slice(0, 40)}...` : 'Query vazia'}
+            </span>
           </div>
           <Badge variant="outline" className="text-xs">
             <Settings className="h-3 w-3 mr-1" />
             {validationLabels[item.validationRule.type] || item.validationRule.type}
           </Badge>
           {item.expectedInputBinding && (
-            <Badge className="text-xs bg-primary/10 text-primary hover:bg-primary/20">
-              → {getBindingLabel(item.expectedInputBinding)}
+            <Badge className={cn(
+              "text-xs",
+              expectedInputs.some(i => i.key === item.expectedInputBinding)
+                ? "bg-primary/10 text-primary hover:bg-primary/20"
+                : "bg-destructive/10 text-destructive hover:bg-destructive/20"
+            )}>
+              → {getBindingLabel(item.expectedInputBinding) || `${item.expectedInputBinding} (não encontrado)`}
             </Badge>
           )}
         </div>
@@ -214,9 +315,18 @@ export function SectionEditor({
     }
   };
 
+  // Calculate section-level validation issues
+  const sectionIssues = section.items.flatMap(item => validateItem(item, expectedInputs));
+  const sectionErrors = sectionIssues.filter(i => i.type === 'error').length;
+  const sectionWarnings = sectionIssues.filter(i => i.type === 'warning').length;
+
   return (
     <>
-      <Card className="overflow-hidden">
+      <Card className={cn(
+        "overflow-hidden",
+        sectionErrors > 0 && "border-destructive/30",
+        sectionErrors === 0 && sectionWarnings > 0 && "border-yellow-500/30"
+      )}>
         <Collapsible open={isExpanded} onOpenChange={onToggle}>
           <CardHeader className="p-0">
             <CollapsibleTrigger asChild>
@@ -252,6 +362,18 @@ export function SectionEditor({
                       <div className="flex items-center gap-2">
                         <span className="font-semibold">{section.title}</span>
                         <Badge variant="outline" className="text-xs font-mono">{section.key}</Badge>
+                        {sectionErrors > 0 && (
+                          <Badge variant="destructive" className="text-xs">
+                            <AlertCircle className="h-3 w-3 mr-1" />
+                            {sectionErrors} erro{sectionErrors > 1 ? 's' : ''}
+                          </Badge>
+                        )}
+                        {sectionErrors === 0 && sectionWarnings > 0 && (
+                          <Badge className="text-xs bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20">
+                            <AlertTriangle className="h-3 w-3 mr-1" />
+                            {sectionWarnings} aviso{sectionWarnings > 1 ? 's' : ''}
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-sm text-muted-foreground">
                         {section.items.length} {section.items.length === 1 ? 'item' : 'itens'}
@@ -299,6 +421,7 @@ export function SectionEditor({
                         onEditItem={onEditItem}
                         onDeleteItem={(id) => setDeleteItemId(id)}
                         getBindingLabel={getBindingLabel}
+                        expectedInputs={expectedInputs}
                       />
                     ))}
                   </SortableContext>

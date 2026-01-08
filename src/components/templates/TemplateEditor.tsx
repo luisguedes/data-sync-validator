@@ -1,11 +1,13 @@
-import { useState } from 'react';
-import { Plus, Save, GripVertical } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Plus, Save, GripVertical, AlertCircle, AlertTriangle, CheckCircle2 } from 'lucide-react';
 import { ChecklistTemplate, TemplateSection, TemplateItem, ExpectedInput } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { SectionEditor } from './SectionEditor';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { SectionEditor, validateItem } from './SectionEditor';
 import { ItemEditorModal } from './ItemEditorModal';
 import { ExpectedInputsEditor } from './ExpectedInputsEditor';
 import { toast } from 'sonner';
@@ -234,6 +236,33 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
 
   const totalItems = editedTemplate.sections.reduce((acc, s) => acc + s.items.length, 0);
 
+  // Calculate global validation summary
+  const validationSummary = useMemo(() => {
+    let totalErrors = 0;
+    let totalWarnings = 0;
+    const itemsWithErrors: { sectionTitle: string; itemTitle: string; errors: string[] }[] = [];
+
+    editedTemplate.sections.forEach(section => {
+      section.items.forEach(item => {
+        const issues = validateItem(item, editedTemplate.expectedInputs);
+        const errors = issues.filter(i => i.type === 'error');
+        const warnings = issues.filter(i => i.type === 'warning');
+        totalErrors += errors.length;
+        totalWarnings += warnings.length;
+
+        if (errors.length > 0) {
+          itemsWithErrors.push({
+            sectionTitle: section.title,
+            itemTitle: item.title || 'Sem título',
+            errors: errors.map(e => e.message),
+          });
+        }
+      });
+    });
+
+    return { totalErrors, totalWarnings, itemsWithErrors };
+  }, [editedTemplate.sections, editedTemplate.expectedInputs]);
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -243,6 +272,24 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
           <p className="text-muted-foreground">Configure seções, itens e regras de validação. Arraste para reordenar.</p>
         </div>
         <div className="flex items-center gap-2">
+          {validationSummary.totalErrors > 0 && (
+            <Badge variant="destructive" className="text-sm">
+              <AlertCircle className="h-3.5 w-3.5 mr-1" />
+              {validationSummary.totalErrors} erro{validationSummary.totalErrors > 1 ? 's' : ''}
+            </Badge>
+          )}
+          {validationSummary.totalErrors === 0 && validationSummary.totalWarnings > 0 && (
+            <Badge className="text-sm bg-yellow-500/10 text-yellow-600 hover:bg-yellow-500/20">
+              <AlertTriangle className="h-3.5 w-3.5 mr-1" />
+              {validationSummary.totalWarnings} aviso{validationSummary.totalWarnings > 1 ? 's' : ''}
+            </Badge>
+          )}
+          {validationSummary.totalErrors === 0 && validationSummary.totalWarnings === 0 && totalItems > 0 && (
+            <Badge className="text-sm bg-status-completed/10 text-status-completed hover:bg-status-completed/20">
+              <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
+              Válido
+            </Badge>
+          )}
           <Button variant="outline" onClick={onCancel}>
             Cancelar
           </Button>
@@ -253,9 +300,38 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
         </div>
       </div>
 
+      {/* Validation Alert */}
+      {validationSummary.totalErrors > 0 && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Existem {validationSummary.totalErrors} erro{validationSummary.totalErrors > 1 ? 's' : ''} no template</AlertTitle>
+          <AlertDescription>
+            <ul className="mt-2 space-y-1 text-sm">
+              {validationSummary.itemsWithErrors.slice(0, 5).map((item, idx) => (
+                <li key={idx}>
+                  <strong>{item.sectionTitle}</strong> → {item.itemTitle}: {item.errors.join(', ')}
+                </li>
+              ))}
+              {validationSummary.itemsWithErrors.length > 5 && (
+                <li className="text-muted-foreground">
+                  ... e mais {validationSummary.itemsWithErrors.length - 5} itens com erros
+                </li>
+              )}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
+
       <Tabs defaultValue="structure" className="space-y-4">
         <TabsList>
-          <TabsTrigger value="structure">Estrutura</TabsTrigger>
+          <TabsTrigger value="structure" className="relative">
+            Estrutura
+            {validationSummary.totalErrors > 0 && (
+              <span className="ml-1.5 inline-flex items-center justify-center w-5 h-5 text-xs font-medium rounded-full bg-destructive text-destructive-foreground">
+                {validationSummary.totalErrors}
+              </span>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="inputs">Inputs Esperados ({editedTemplate.expectedInputs.length})</TabsTrigger>
           <TabsTrigger value="info">Informações</TabsTrigger>
         </TabsList>
