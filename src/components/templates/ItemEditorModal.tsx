@@ -288,14 +288,14 @@ export function ItemEditorModal({
               <div className="space-y-2">
                 <Label>Binding do Valor Esperado</Label>
                 <Select
-                  value={formData.expectedInputBinding || ''}
-                  onValueChange={(value) => handleChange('expectedInputBinding', value || undefined)}
+                  value={formData.expectedInputBinding || '_none'}
+                  onValueChange={(value) => handleChange('expectedInputBinding', value === '_none' ? undefined : value)}
                 >
                   <SelectTrigger>
                     <SelectValue placeholder="Selecione um input esperado" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="">Nenhum</SelectItem>
+                    <SelectItem value="_none">Nenhum</SelectItem>
                     {expectedInputs.map((input) => (
                       <SelectItem key={input.key} value={input.key}>
                         <div className="flex items-center gap-2">
