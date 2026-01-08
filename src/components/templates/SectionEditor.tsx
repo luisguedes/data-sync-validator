@@ -16,6 +16,24 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { cn } from '@/lib/utils';
 
 interface SectionEditorProps {
   section: TemplateSection;
@@ -38,6 +56,96 @@ const validationLabels: Record<string, string> = {
   number_matches_expected_with_tolerance: 'Tolerância',
 };
 
+interface SortableItemRowProps {
+  item: TemplateItem;
+  onEditItem: (item: TemplateItem) => void;
+  onDeleteItem: (itemId: string) => void;
+  getBindingLabel: (binding?: string) => string | null;
+}
+
+function SortableItemRow({ item, onEditItem, onDeleteItem, getBindingLabel }: SortableItemRowProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: item.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        'flex items-start gap-3 p-3 rounded-lg border bg-background hover:bg-muted/30 transition-colors group',
+        isDragging && 'z-50 opacity-90 shadow-lg ring-2 ring-primary/20'
+      )}
+    >
+      <button
+        className="cursor-grab active:cursor-grabbing touch-none p-0.5 hover:bg-muted rounded mt-1"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-4 w-4 text-muted-foreground/50" />
+      </button>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{item.title}</span>
+          <Badge variant="secondary" className="text-xs">
+            {item.scope === 'global' ? 'Global' : 'Por Loja'}
+          </Badge>
+          {item.autoResolve && (
+            <Badge variant="outline" className="text-xs text-status-completed">
+              Auto-resolve
+            </Badge>
+          )}
+        </div>
+        <p className="text-sm text-muted-foreground line-clamp-1">{item.description}</p>
+        
+        <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
+          <div className="flex items-center gap-1 text-muted-foreground">
+            <Code className="h-3 w-3" />
+            <span className="font-mono truncate max-w-[200px]">{item.query.slice(0, 40)}...</span>
+          </div>
+          <Badge variant="outline" className="text-xs">
+            <Settings className="h-3 w-3 mr-1" />
+            {validationLabels[item.validationRule.type] || item.validationRule.type}
+          </Badge>
+          {item.expectedInputBinding && (
+            <Badge className="text-xs bg-primary/10 text-primary hover:bg-primary/20">
+              → {getBindingLabel(item.expectedInputBinding)}
+            </Badge>
+          )}
+        </div>
+      </div>
+      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8"
+          onClick={() => onEditItem(item)}
+        >
+          <Edit className="h-4 w-4" />
+        </Button>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-8 w-8 text-destructive hover:text-destructive"
+          onClick={() => onDeleteItem(item.id)}
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function SectionEditor({
   section,
   index,
@@ -55,6 +163,17 @@ export function SectionEditor({
   const [editKey, setEditKey] = useState(section.key);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteItemId, setDeleteItemId] = useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   const handleSaveEdit = () => {
     onUpdate({ title: editTitle, key: editKey });
@@ -79,6 +198,22 @@ export function SectionEditor({
     return input?.label || binding;
   };
 
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (over && active.id !== over.id) {
+      const oldIndex = section.items.findIndex(item => item.id === active.id);
+      const newIndex = section.items.findIndex(item => item.id === over.id);
+
+      const newItems = arrayMove(section.items, oldIndex, newIndex).map((item, idx) => ({
+        ...item,
+        order: idx + 1,
+      }));
+
+      onUpdate({ items: newItems });
+    }
+  };
+
   return (
     <>
       <Card className="overflow-hidden">
@@ -86,12 +221,13 @@ export function SectionEditor({
           <CardHeader className="p-0">
             <CollapsibleTrigger asChild>
               <div className="flex items-center gap-3 p-4 hover:bg-muted/50 cursor-pointer transition-colors">
-                <GripVertical className="h-4 w-4 text-muted-foreground/50" />
-                {isExpanded ? (
-                  <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                ) : (
-                  <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                )}
+                <div className="flex-shrink-0">
+                  {isExpanded ? (
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                  ) : (
+                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                  )}
+                </div>
                 
                 {isEditing ? (
                   <div className="flex items-center gap-2 flex-1" onClick={(e) => e.stopPropagation()}>
@@ -146,63 +282,27 @@ export function SectionEditor({
 
           <CollapsibleContent>
             <CardContent className="pt-0 px-4 pb-4">
-              <div className="space-y-2 ml-7">
-                {section.items.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-start gap-3 p-3 rounded-lg border bg-background hover:bg-muted/30 transition-colors group"
+              <div className="space-y-2 ml-4">
+                <DndContext
+                  sensors={sensors}
+                  collisionDetection={closestCenter}
+                  onDragEnd={handleDragEnd}
+                >
+                  <SortableContext
+                    items={section.items.map(item => item.id)}
+                    strategy={verticalListSortingStrategy}
                   >
-                    <GripVertical className="h-4 w-4 text-muted-foreground/50 mt-1" />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{item.title}</span>
-                        <Badge variant="secondary" className="text-xs">
-                          {item.scope === 'global' ? 'Global' : 'Por Loja'}
-                        </Badge>
-                        {item.autoResolve && (
-                          <Badge variant="outline" className="text-xs text-status-completed">
-                            Auto-resolve
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-muted-foreground line-clamp-1">{item.description}</p>
-                      
-                      <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
-                        <div className="flex items-center gap-1 text-muted-foreground">
-                          <Code className="h-3 w-3" />
-                          <span className="font-mono truncate max-w-[200px]">{item.query.slice(0, 40)}...</span>
-                        </div>
-                        <Badge variant="outline" className="text-xs">
-                          <Settings className="h-3 w-3 mr-1" />
-                          {validationLabels[item.validationRule.type] || item.validationRule.type}
-                        </Badge>
-                        {item.expectedInputBinding && (
-                          <Badge className="text-xs bg-primary/10 text-primary hover:bg-primary/20">
-                            → {getBindingLabel(item.expectedInputBinding)}
-                          </Badge>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8"
-                        onClick={() => onEditItem(item)}
-                      >
-                        <Edit className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-8 w-8 text-destructive hover:text-destructive"
-                        onClick={() => setDeleteItemId(item.id)}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                    {section.items.map((item) => (
+                      <SortableItemRow
+                        key={item.id}
+                        item={item}
+                        onEditItem={onEditItem}
+                        onDeleteItem={(id) => setDeleteItemId(id)}
+                        getBindingLabel={getBindingLabel}
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
 
                 <Button
                   variant="outline"
