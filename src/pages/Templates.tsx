@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, Search, MoreHorizontal, FileText, Copy, Download, Upload, Loader2 } from 'lucide-react';
+import { Plus, Search, MoreHorizontal, FileText, Copy, Download, Upload, Loader2, ArrowLeft, Edit } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -15,6 +15,7 @@ import { useTemplates } from '@/hooks/useTemplates';
 import { TemplateFormModal } from '@/components/templates/TemplateFormModal';
 import { ImportTemplateModal } from '@/components/templates/ImportTemplateModal';
 import { DeleteTemplateDialog } from '@/components/templates/DeleteTemplateDialog';
+import { TemplateEditor } from '@/components/templates/TemplateEditor';
 import { ChecklistTemplate } from '@/types';
 import { toast } from 'sonner';
 
@@ -37,6 +38,7 @@ export default function Templates() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<ChecklistTemplate | null>(null);
   const [modalMode, setModalMode] = useState<'create' | 'edit'>('create');
+  const [editingTemplate, setEditingTemplate] = useState<ChecklistTemplate | null>(null);
 
   const handleCreate = () => {
     setSelectedTemplate(null);
@@ -45,6 +47,10 @@ export default function Templates() {
   };
 
   const handleEdit = (template: ChecklistTemplate) => {
+    setEditingTemplate(template);
+  };
+
+  const handleEditBasic = (template: ChecklistTemplate) => {
     setSelectedTemplate(template);
     setModalMode('edit');
     setIsFormModalOpen(true);
@@ -57,16 +63,30 @@ export default function Templates() {
 
   const handleSubmit = (data: { name: string; description: string; version: string }) => {
     if (modalMode === 'create') {
-      createTemplate({
+      const newTemplate = createTemplate({
         ...data,
         expectedInputs: [],
         sections: [],
       });
       toast.success('Template criado com sucesso!');
+      // Open editor for new template
+      setEditingTemplate(newTemplate);
     } else if (selectedTemplate) {
       updateTemplate(selectedTemplate.id, data);
       toast.success('Template atualizado com sucesso!');
     }
+  };
+
+  const handleSaveTemplate = (template: ChecklistTemplate) => {
+    updateTemplate(template.id, {
+      name: template.name,
+      description: template.description,
+      version: template.version,
+      expectedInputs: template.expectedInputs,
+      sections: template.sections,
+    });
+    toast.success('Template salvo com sucesso!');
+    setEditingTemplate(null);
   };
 
   const handleConfirmDelete = () => {
@@ -114,6 +134,17 @@ export default function Templates() {
       <div className="flex items-center justify-center h-64">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
       </div>
+    );
+  }
+
+  // Show editor if editing a template
+  if (editingTemplate) {
+    return (
+      <TemplateEditor
+        template={editingTemplate}
+        onSave={handleSaveTemplate}
+        onCancel={() => setEditingTemplate(null)}
+      />
     );
   }
 
@@ -177,7 +208,11 @@ export default function Templates() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={() => handleEdit(template)}>
-                    Editar
+                    <Edit className="mr-2 h-4 w-4" />
+                    Editar Seções/Itens
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => handleEditBasic(template)}>
+                    Editar Info Básica
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => handleDuplicate(template)}>
                     <Copy className="mr-2 h-4 w-4" />
