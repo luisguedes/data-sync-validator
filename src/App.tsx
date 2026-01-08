@@ -15,6 +15,7 @@ import Dashboard from "@/pages/Dashboard";
 import Connections from "@/pages/Connections";
 import Templates from "@/pages/Templates";
 import Conferences from "@/pages/Conferences";
+import ConferenceExecution from "@/pages/ConferenceExecution";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
