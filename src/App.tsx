@@ -16,6 +16,7 @@ import Connections from "@/pages/Connections";
 import Templates from "@/pages/Templates";
 import Conferences from "@/pages/Conferences";
 import ConferenceExecution from "@/pages/ConferenceExecution";
+import ClientConference from "@/pages/ClientConference";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -127,6 +128,9 @@ const App = () => (
                   </ProtectedRoute>
                 }
               />
+
+              {/* Public client route - no auth required */}
+              <Route path="/client/:token" element={<ClientConference />} />
 
               {/* Redirects */}
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
