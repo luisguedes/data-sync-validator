@@ -1,17 +1,32 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Plus, GripVertical, Trash2, Edit, Settings, Code, Save } from 'lucide-react';
+import { Plus, Save, GripVertical } from 'lucide-react';
 import { ChecklistTemplate, TemplateSection, TemplateItem, ExpectedInput } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
-import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { SectionEditor } from './SectionEditor';
 import { ItemEditorModal } from './ItemEditorModal';
 import { ExpectedInputsEditor } from './ExpectedInputsEditor';
 import { toast } from 'sonner';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { cn } from '@/lib/utils';
 
 interface TemplateEditorProps {
   template: ChecklistTemplate;
@@ -19,11 +34,65 @@ interface TemplateEditorProps {
   onCancel: () => void;
 }
 
+interface SortableSectionWrapperProps {
+  section: TemplateSection;
+  children: React.ReactNode;
+}
+
+function SortableSectionWrapper({ section, children }: SortableSectionWrapperProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: section.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        'relative',
+        isDragging && 'z-50 opacity-90 shadow-lg'
+      )}
+    >
+      <div
+        className="absolute left-0 top-4 z-10 cursor-grab active:cursor-grabbing touch-none p-1 hover:bg-muted rounded"
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical className="h-4 w-4 text-muted-foreground/50" />
+      </div>
+      <div className="pl-8">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorProps) {
   const [editedTemplate, setEditedTemplate] = useState<ChecklistTemplate>({ ...template });
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(template.sections.map(s => s.id)));
   const [editingItem, setEditingItem] = useState<{ sectionId: string; item: TemplateItem } | null>(null);
   const [isItemModalOpen, setIsItemModalOpen] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
 
   const toggleSection = (sectionId: string) => {
     setExpandedSections(prev => {
@@ -144,6 +213,25 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
     onSave(editedTemplate);
   };
 
+  const handleSectionDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+
+    if (over && active.id !== over.id) {
+      const oldIndex = editedTemplate.sections.findIndex(s => s.id === active.id);
+      const newIndex = editedTemplate.sections.findIndex(s => s.id === over.id);
+
+      const newSections = arrayMove(editedTemplate.sections, oldIndex, newIndex).map((section, idx) => ({
+        ...section,
+        order: idx + 1,
+      }));
+
+      setEditedTemplate(prev => ({
+        ...prev,
+        sections: newSections,
+      }));
+    }
+  };
+
   const totalItems = editedTemplate.sections.reduce((acc, s) => acc + s.items.length, 0);
 
   return (
@@ -152,7 +240,7 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Editar Template</h1>
-          <p className="text-muted-foreground">Configure seções, itens e regras de validação</p>
+          <p className="text-muted-foreground">Configure seções, itens e regras de validação. Arraste para reordenar.</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={onCancel}>
@@ -185,23 +273,35 @@ export function TemplateEditor({ template, onSave, onCancel }: TemplateEditorPro
             </Button>
           </div>
 
-          <div className="space-y-3">
-            {editedTemplate.sections.map((section, index) => (
-              <SectionEditor
-                key={section.id}
-                section={section}
-                index={index}
-                isExpanded={expandedSections.has(section.id)}
-                onToggle={() => toggleSection(section.id)}
-                onUpdate={(data) => handleUpdateSection(section.id, data)}
-                onDelete={() => handleDeleteSection(section.id)}
-                onAddItem={() => handleAddItem(section.id)}
-                onEditItem={(item) => handleEditItem(section.id, item)}
-                onDeleteItem={(itemId) => handleDeleteItem(section.id, itemId)}
-                expectedInputs={editedTemplate.expectedInputs}
-              />
-            ))}
-          </div>
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleSectionDragEnd}
+          >
+            <SortableContext
+              items={editedTemplate.sections.map(s => s.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <div className="space-y-3">
+                {editedTemplate.sections.map((section, index) => (
+                  <SortableSectionWrapper key={section.id} section={section}>
+                    <SectionEditor
+                      section={section}
+                      index={index}
+                      isExpanded={expandedSections.has(section.id)}
+                      onToggle={() => toggleSection(section.id)}
+                      onUpdate={(data) => handleUpdateSection(section.id, data)}
+                      onDelete={() => handleDeleteSection(section.id)}
+                      onAddItem={() => handleAddItem(section.id)}
+                      onEditItem={(item) => handleEditItem(section.id, item)}
+                      onDeleteItem={(itemId) => handleDeleteItem(section.id, itemId)}
+                      expectedInputs={editedTemplate.expectedInputs}
+                    />
+                  </SortableSectionWrapper>
+                ))}
+              </div>
+            </SortableContext>
+          </DndContext>
 
           {editedTemplate.sections.length === 0 && (
             <Card className="border-dashed">
