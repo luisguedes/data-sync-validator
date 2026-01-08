@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Code, Settings, AlertTriangle } from 'lucide-react';
+import { useEffect, useState, useMemo } from 'react';
+import { Code, Settings, AlertTriangle, Eye } from 'lucide-react';
 import { TemplateItem, ExpectedInput, ValidationRule } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 
 interface ItemEditorModalProps {
@@ -50,12 +51,39 @@ export function ItemEditorModal({
   onSave,
 }: ItemEditorModalProps) {
   const [formData, setFormData] = useState<TemplateItem | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewValues, setPreviewValues] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (item) {
       setFormData({ ...item });
+      // Initialize preview values with example data
+      const initialValues: Record<string, string> = {
+        store_id: '123',
+        data_inicio: '2025-01-01',
+        data_fim: '2025-01-31',
+      };
+      expectedInputs.forEach(input => {
+        initialValues[input.key] = input.type === 'number' ? '1000' : 'exemplo';
+      });
+      setPreviewValues(initialValues);
     }
-  }, [item]);
+  }, [item, expectedInputs]);
+
+  // Generate preview query with substituted variables
+  const previewQuery = useMemo(() => {
+    if (!formData?.query) return '';
+    
+    let query = formData.query;
+    Object.entries(previewValues).forEach(([key, value]) => {
+      const regex = new RegExp(`:${key}\\b`, 'g');
+      // Wrap strings in quotes, leave numbers as-is
+      const isNumber = !isNaN(Number(value)) && value.trim() !== '';
+      const replacement = isNumber ? value : `'${value}'`;
+      query = query.replace(regex, replacement);
+    });
+    return query;
+  }, [formData?.query, previewValues]);
 
   if (!formData) return null;
 
@@ -237,6 +265,77 @@ export function ItemEditorModal({
                 </ul>
               </AlertDescription>
             </Alert>
+
+            {/* Query Preview Section */}
+            <Collapsible open={showPreview} onOpenChange={setShowPreview}>
+              <CollapsibleTrigger asChild>
+                <Button variant="outline" className="w-full justify-between">
+                  <span className="flex items-center gap-2">
+                    <Eye className="h-4 w-4" />
+                    Preview da Query
+                  </span>
+                  <Badge variant="secondary" className="text-xs">
+                    {showPreview ? 'Ocultar' : 'Mostrar'}
+                  </Badge>
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="mt-4 space-y-4">
+                <div className="grid gap-3 p-4 border rounded-lg bg-muted/30">
+                  <Label className="text-sm font-medium">Valores de exemplo:</Label>
+                  <div className="grid gap-2 md:grid-cols-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">:store_id</Label>
+                      <Input
+                        value={previewValues.store_id || ''}
+                        onChange={(e) => setPreviewValues(prev => ({ ...prev, store_id: e.target.value }))}
+                        className="h-8 text-sm font-mono"
+                        placeholder="123"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">:data_inicio</Label>
+                      <Input
+                        type="date"
+                        value={previewValues.data_inicio || ''}
+                        onChange={(e) => setPreviewValues(prev => ({ ...prev, data_inicio: e.target.value }))}
+                        className="h-8 text-sm font-mono"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs text-muted-foreground">:data_fim</Label>
+                      <Input
+                        type="date"
+                        value={previewValues.data_fim || ''}
+                        onChange={(e) => setPreviewValues(prev => ({ ...prev, data_fim: e.target.value }))}
+                        className="h-8 text-sm font-mono"
+                      />
+                    </div>
+                    {expectedInputs.map(input => (
+                      <div key={input.key} className="space-y-1">
+                        <Label className="text-xs text-muted-foreground">:{input.key}</Label>
+                        <Input
+                          type={input.type === 'number' ? 'number' : 'text'}
+                          value={previewValues[input.key] || ''}
+                          onChange={(e) => setPreviewValues(prev => ({ ...prev, [input.key]: e.target.value }))}
+                          className="h-8 text-sm font-mono"
+                          placeholder={input.label}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium flex items-center gap-2">
+                    <Code className="h-4 w-4" />
+                    Query com variáveis substituídas:
+                  </Label>
+                  <pre className="p-4 bg-muted rounded-lg text-sm font-mono whitespace-pre-wrap overflow-x-auto border">
+                    {previewQuery || 'Digite uma query acima para ver o preview'}
+                  </pre>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           </TabsContent>
 
           {/* Validation Tab */}
