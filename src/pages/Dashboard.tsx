@@ -6,49 +6,17 @@ import {
   Plus,
   TrendingUp,
   Database,
-  FileText
+  FileText,
+  Loader2
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/contexts/AuthContext';
-
-// Mock data for demonstration
-const mockConferences = [
-  {
-    id: '1',
-    name: 'Migração Loja Central',
-    clientName: 'João Silva',
-    status: 'pending' as const,
-    createdAt: new Date('2024-01-15'),
-    expiresAt: new Date('2024-01-22'),
-  },
-  {
-    id: '2',
-    name: 'Validação Dados Financeiros',
-    clientName: 'Maria Santos',
-    status: 'in_progress' as const,
-    createdAt: new Date('2024-01-14'),
-    expiresAt: new Date('2024-01-21'),
-  },
-  {
-    id: '3',
-    name: 'Conferência Estoque',
-    clientName: 'Pedro Costa',
-    status: 'completed' as const,
-    createdAt: new Date('2024-01-10'),
-    completedAt: new Date('2024-01-12'),
-  },
-  {
-    id: '4',
-    name: 'Migração Filial Norte',
-    clientName: 'Ana Oliveira',
-    status: 'divergent' as const,
-    createdAt: new Date('2024-01-08'),
-    divergences: 3,
-  },
-];
+import { useConferences } from '@/hooks/useConferences';
+import { useConnections } from '@/hooks/useConnections';
+import { useTemplates } from '@/hooks/useTemplates';
 
 const statusConfig = {
   pending: {
@@ -75,14 +43,19 @@ const statusConfig = {
 
 export default function Dashboard() {
   const { user } = useAuth();
+  const { recentConferences, stats, isLoading: loadingConferences } = useConferences();
+  const { allConnections, isLoading: loadingConnections } = useConnections();
+  const { allTemplates, isLoading: loadingTemplates } = useTemplates();
 
-  const stats = {
-    total: mockConferences.length,
-    pending: mockConferences.filter(c => c.status === 'pending').length,
-    inProgress: mockConferences.filter(c => c.status === 'in_progress').length,
-    completed: mockConferences.filter(c => c.status === 'completed').length,
-    divergent: mockConferences.filter(c => c.status === 'divergent').length,
-  };
+  const isLoading = loadingConferences || loadingConnections || loadingTemplates;
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -167,7 +140,9 @@ export default function Dashboard() {
               </div>
               <div>
                 <CardTitle className="text-lg">Conexões</CardTitle>
-                <CardDescription>Gerenciar bancos de dados</CardDescription>
+                <CardDescription>
+                  {allConnections.length} banco{allConnections.length !== 1 && 's'} configurado{allConnections.length !== 1 && 's'}
+                </CardDescription>
               </div>
             </CardHeader>
           </Link>
@@ -181,7 +156,9 @@ export default function Dashboard() {
               </div>
               <div>
                 <CardTitle className="text-lg">Templates</CardTitle>
-                <CardDescription>Modelos de checklist</CardDescription>
+                <CardDescription>
+                  {allTemplates.length} modelo{allTemplates.length !== 1 && 's'} disponíve{allTemplates.length !== 1 ? 'is' : 'l'}
+                </CardDescription>
               </div>
             </CardHeader>
           </Link>
@@ -216,37 +193,50 @@ export default function Dashboard() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="space-y-4">
-            {mockConferences.map((conference) => {
-              const status = statusConfig[conference.status];
-              const StatusIcon = status.icon;
+          {recentConferences.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              <ClipboardCheck className="mx-auto h-10 w-10 mb-3 opacity-50" />
+              <p>Nenhuma conferência criada ainda.</p>
+              <Button asChild className="mt-4">
+                <Link to="/conferences/new">
+                  <Plus className="mr-2 h-4 w-4" />
+                  Criar Primeira Conferência
+                </Link>
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {recentConferences.map((conference) => {
+                const status = statusConfig[conference.status];
+                const StatusIcon = status.icon;
 
-              return (
-                <div
-                  key={conference.id}
-                  className="flex items-center justify-between p-4 rounded-lg border hover:bg-muted/50 transition-colors"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className={`p-2 rounded-lg ${status.className}`}>
-                      <StatusIcon className="h-5 w-5" />
+                return (
+                  <div
+                    key={conference.id}
+                    className="flex items-center justify-between p-4 rounded-lg border hover:bg-muted/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-4">
+                      <div className={`p-2 rounded-lg ${status.className}`}>
+                        <StatusIcon className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <p className="font-medium">{conference.name}</p>
+                        <p className="text-sm text-muted-foreground">{conference.clientName}</p>
+                      </div>
                     </div>
-                    <div>
-                      <p className="font-medium">{conference.name}</p>
-                      <p className="text-sm text-muted-foreground">{conference.clientName}</p>
+                    <div className="flex items-center gap-3">
+                      <Badge variant="outline" className={status.className}>
+                        {status.label}
+                      </Badge>
+                      <Button variant="ghost" size="sm" asChild>
+                        <Link to={`/conferences/${conference.id}`}>Ver detalhes</Link>
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
-                    <Badge variant="outline" className={status.className}>
-                      {status.label}
-                    </Badge>
-                    <Button variant="ghost" size="sm" asChild>
-                      <Link to={`/conferences/${conference.id}`}>Ver detalhes</Link>
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
     </div>
