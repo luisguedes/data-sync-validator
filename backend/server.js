@@ -2,14 +2,70 @@ require('dotenv').config();
 const express = require('express');
 const nodemailer = require('nodemailer');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const app = express();
+
+// ============================================
+// API Key Authentication
+// ============================================
+const API_KEY = process.env.API_KEY;
+const API_KEY_HEADER = 'x-api-key';
+
+// Endpoints that don't require authentication
+const PUBLIC_ENDPOINTS = [
+  '/api/health',
+  '/api/health/live',
+  '/metrics',
+];
+
+// API Key validation middleware
+const authenticateApiKey = (req, res, next) => {
+  // Skip auth for public endpoints
+  if (PUBLIC_ENDPOINTS.some(endpoint => req.path.startsWith(endpoint))) {
+    return next();
+  }
+
+  // Skip auth if API_KEY is not configured (development mode)
+  if (!API_KEY) {
+    console.warn('⚠️ API_KEY not configured - running in development mode without authentication');
+    return next();
+  }
+
+  const providedKey = req.headers[API_KEY_HEADER];
+
+  if (!providedKey) {
+    metrics.requests.unauthorized++;
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized',
+      message: 'API key is required. Provide it in the x-api-key header.',
+    });
+  }
+
+  // Use timing-safe comparison to prevent timing attacks
+  const isValid = crypto.timingSafeEqual(
+    Buffer.from(providedKey),
+    Buffer.from(API_KEY)
+  );
+
+  if (!isValid) {
+    metrics.requests.unauthorized++;
+    return res.status(403).json({
+      success: false,
+      error: 'Forbidden',
+      message: 'Invalid API key.',
+    });
+  }
+
+  next();
+};
 
 // ============================================
 // Metrics Collection
 // ============================================
 const metrics = {
-  requests: { total: 0, success: 0, error: 0 },
+  requests: { total: 0, success: 0, error: 0, unauthorized: 0 },
   emails: { sent: 0, failed: 0 },
   smtp: { status: 'unknown', lastCheck: null },
   uptime: Date.now(),
@@ -42,11 +98,69 @@ app.use((req, res, next) => {
 const corsOptions = {
   origin: process.env.CORS_ORIGIN || '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', API_KEY_HEADER],
 };
 
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
+
+// Apply API key authentication to all routes
+app.use(authenticateApiKey);
+
+// ============================================
+// Rate Limiting (Simple in-memory)
+// ============================================
+const rateLimitStore = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000; // 1 minute
+const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '30'); // 30 requests per minute
+
+const rateLimit = (req, res, next) => {
+  // Skip rate limiting for health checks
+  if (req.path.startsWith('/api/health') || req.path === '/metrics') {
+    return next();
+  }
+
+  const clientIp = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+  const now = Date.now();
+  
+  if (!rateLimitStore.has(clientIp)) {
+    rateLimitStore.set(clientIp, { count: 1, startTime: now });
+    return next();
+  }
+
+  const clientData = rateLimitStore.get(clientIp);
+  
+  if (now - clientData.startTime > RATE_LIMIT_WINDOW) {
+    // Reset window
+    rateLimitStore.set(clientIp, { count: 1, startTime: now });
+    return next();
+  }
+
+  clientData.count++;
+  
+  if (clientData.count > RATE_LIMIT_MAX) {
+    return res.status(429).json({
+      success: false,
+      error: 'Too Many Requests',
+      message: `Rate limit exceeded. Maximum ${RATE_LIMIT_MAX} requests per minute.`,
+      retryAfter: Math.ceil((RATE_LIMIT_WINDOW - (now - clientData.startTime)) / 1000),
+    });
+  }
+
+  next();
+};
+
+app.use(rateLimit);
+
+// Cleanup old rate limit entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, data] of rateLimitStore.entries()) {
+    if (now - data.startTime > RATE_LIMIT_WINDOW * 2) {
+      rateLimitStore.delete(ip);
+    }
+  }
+}, 5 * 60 * 1000);
 
 // ============================================
 // SMTP Transporter
@@ -81,25 +195,22 @@ const verifySMTP = async () => {
 };
 
 verifySMTP();
-
-// Periodic SMTP health check
-setInterval(verifySMTP, 60000); // Check every minute
+setInterval(verifySMTP, 60000);
 
 // ============================================
-// Health Check Endpoints
+// Health Check Endpoints (Public)
 // ============================================
 
-// Basic health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
     uptime: Math.floor((Date.now() - metrics.uptime) / 1000),
+    authEnabled: !!API_KEY,
   });
 });
 
-// Detailed health check for monitoring
 app.get('/api/health/detailed', async (req, res) => {
   const smtpHealthy = metrics.smtp.status === 'connected';
   const avgResponseTime = metrics.responseTime.count > 0 
@@ -111,6 +222,7 @@ app.get('/api/health/detailed', async (req, res) => {
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
     uptime: Math.floor((Date.now() - metrics.uptime) / 1000),
+    authEnabled: !!API_KEY,
     checks: {
       smtp: {
         status: smtpHealthy ? 'pass' : 'fail',
@@ -134,12 +246,10 @@ app.get('/api/health/detailed', async (req, res) => {
   res.status(statusCode).json(health);
 });
 
-// Kubernetes/Docker liveness probe
 app.get('/api/health/live', (req, res) => {
   res.status(200).json({ status: 'alive' });
 });
 
-// Kubernetes/Docker readiness probe
 app.get('/api/health/ready', async (req, res) => {
   if (metrics.smtp.status === 'connected') {
     res.status(200).json({ status: 'ready' });
@@ -149,7 +259,7 @@ app.get('/api/health/ready', async (req, res) => {
 });
 
 // ============================================
-// Prometheus Metrics Endpoint
+// Prometheus Metrics Endpoint (Public)
 // ============================================
 app.get('/metrics', (req, res) => {
   const uptimeSeconds = Math.floor((Date.now() - metrics.uptime) / 1000);
@@ -167,6 +277,7 @@ email_backend_uptime_seconds ${uptimeSeconds}
 # TYPE email_backend_requests_total counter
 email_backend_requests_total{status="success"} ${metrics.requests.success}
 email_backend_requests_total{status="error"} ${metrics.requests.error}
+email_backend_requests_total{status="unauthorized"} ${metrics.requests.unauthorized}
 
 # HELP email_backend_emails_total Total number of emails processed
 # TYPE email_backend_emails_total counter
@@ -176,6 +287,10 @@ email_backend_emails_total{status="failed"} ${metrics.emails.failed}
 # HELP email_backend_smtp_status SMTP connection status (1=connected, 0=disconnected)
 # TYPE email_backend_smtp_status gauge
 email_backend_smtp_status ${metrics.smtp.status === 'connected' ? 1 : 0}
+
+# HELP email_backend_auth_enabled Authentication enabled (1=yes, 0=no)
+# TYPE email_backend_auth_enabled gauge
+email_backend_auth_enabled ${API_KEY ? 1 : 0}
 
 # HELP email_backend_response_time_avg_ms Average response time in milliseconds
 # TYPE email_backend_response_time_avg_ms gauge
@@ -192,6 +307,10 @@ email_backend_memory_heap_total_bytes ${memUsage.heapTotal}
 # HELP email_backend_memory_rss_bytes Resident set size
 # TYPE email_backend_memory_rss_bytes gauge
 email_backend_memory_rss_bytes ${memUsage.rss}
+
+# HELP email_backend_rate_limit_active Active rate limit entries
+# TYPE email_backend_rate_limit_active gauge
+email_backend_rate_limit_active ${rateLimitStore.size}
 `.trim();
 
   res.set('Content-Type', 'text/plain');
@@ -199,8 +318,10 @@ email_backend_memory_rss_bytes ${memUsage.rss}
 });
 
 // ============================================
-// SMTP Test Endpoint
+// Protected Endpoints
 // ============================================
+
+// Test SMTP connection (protected)
 app.get('/api/test-smtp', async (req, res) => {
   try {
     await transporter.verify();
@@ -214,9 +335,7 @@ app.get('/api/test-smtp', async (req, res) => {
   }
 });
 
-// ============================================
-// Send Email Endpoint
-// ============================================
+// Send email (protected)
 app.post('/api/send-email', async (req, res) => {
   const { to, subject, html, text } = req.body;
 
@@ -234,6 +353,14 @@ app.post('/api/send-email', async (req, res) => {
     return res.status(400).json({ 
       success: false, 
       message: 'Formato de email inválido' 
+    });
+  }
+
+  // Validate subject length
+  if (subject.length > 200) {
+    return res.status(400).json({
+      success: false,
+      message: 'Assunto muito longo (máximo 200 caracteres)'
     });
   }
 
@@ -264,6 +391,17 @@ app.post('/api/send-email', async (req, res) => {
   }
 });
 
+// Generate API Key (protected - requires existing API key)
+app.post('/api/generate-key', (req, res) => {
+  const newKey = crypto.randomBytes(32).toString('hex');
+  res.json({
+    success: true,
+    message: 'Nova API key gerada. Atualize a variável API_KEY no .env',
+    key: newKey,
+    note: 'Esta key só é exibida uma vez. Guarde em local seguro.',
+  });
+});
+
 // ============================================
 // Graceful Shutdown
 // ============================================
@@ -282,6 +420,7 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Backend de email rodando na porta ${PORT}`);
+  console.log(`🔐 Autenticação: ${API_KEY ? 'ATIVADA' : 'DESATIVADA (modo desenvolvimento)'}`);
   console.log(`📊 Métricas Prometheus: http://localhost:${PORT}/metrics`);
   console.log(`💚 Health check: http://localhost:${PORT}/api/health/detailed`);
 });

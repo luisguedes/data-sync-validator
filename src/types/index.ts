@@ -45,6 +45,7 @@ export interface AppPreferences {
   theme: 'light' | 'dark' | 'system';
   timezone: string;
   backendUrl?: string;
+  backendApiKey?: string;
   emailNotifications?: boolean;
 }
 

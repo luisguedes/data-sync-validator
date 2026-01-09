@@ -38,6 +38,7 @@ export default function Settings() {
     theme: settings.preferences?.theme || 'system',
     timezone: settings.preferences?.timezone || 'America/Sao_Paulo',
     backendUrl: settings.preferences?.backendUrl || 'http://localhost:3001',
+    backendApiKey: settings.preferences?.backendApiKey || '',
     emailNotifications: settings.preferences?.emailNotifications ?? true,
   });
 
@@ -48,6 +49,7 @@ export default function Settings() {
         theme: settings.preferences.theme || 'system',
         timezone: settings.preferences.timezone || 'America/Sao_Paulo',
         backendUrl: settings.preferences.backendUrl || 'http://localhost:3001',
+        backendApiKey: settings.preferences.backendApiKey || '',
         emailNotifications: settings.preferences.emailNotifications ?? true,
       });
     }
@@ -237,6 +239,20 @@ export default function Settings() {
                 </p>
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="backend-api-key">API Key do Backend</Label>
+                <Input
+                  id="backend-api-key"
+                  type="password"
+                  value={preferences.backendApiKey || ''}
+                  onChange={(e) => setPreferences({ ...preferences, backendApiKey: e.target.value })}
+                  placeholder="Deixe em branco para modo desenvolvimento"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Chave de autenticação para acessar endpoints protegidos do backend
+                </p>
+              </div>
+
               <div className="flex items-center justify-between p-4 border rounded-lg">
                 <div className="space-y-0.5">
                   <Label className="text-base">Notificações por Email</Label>
@@ -323,7 +339,11 @@ export default function Settings() {
                   As configurações SMTP são gerenciadas no arquivo <code className="bg-muted px-1 rounded">.env</code> do seu backend local.
                 </p>
                 <pre className="bg-background p-3 rounded text-xs overflow-x-auto">
-{`SMTP_HOST=localhost
+{`# Autenticação
+API_KEY=sua-chave-api-segura
+
+# SMTP
+SMTP_HOST=localhost
 SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=seu_usuario
