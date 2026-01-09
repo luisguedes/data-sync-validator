@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppSettings } from '@/contexts/AppSettingsContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -24,12 +24,21 @@ import {
   X,
   Download,
   ShieldAlert,
-  HardDrive
+  HardDrive,
+  RefreshCw,
+  Wifi,
+  WifiOff,
+  ExternalLink
 } from 'lucide-react';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { DatabaseConfig, SmtpConfig, AppPreferences } from '@/types';
 
+// Steps without backend config - it's now auto-detected
 const steps = [
-  { id: 'backend', title: 'Backend', icon: Server, description: 'Configure a URL do servidor backend' },
   { id: 'database', title: 'Banco de Dados', icon: Database, description: 'Configure a conexão com o PostgreSQL' },
   { id: 'smtp', title: 'Email (SMTP)', icon: Mail, description: 'Configure o servidor de envio de emails' },
   { id: 'admin', title: 'Administrador', icon: User, description: 'Crie o primeiro usuário administrador' },
@@ -53,6 +62,15 @@ interface TestResult {
     size?: number;
     error?: string;
   };
+}
+
+interface BackendStatus {
+  connected: boolean;
+  checking: boolean;
+  version?: string;
+  uptime?: number;
+  error?: string;
+  url: string;
 }
 
 export default function Setup() {
@@ -79,7 +97,14 @@ export default function Setup() {
   const [initResult, setInitResult] = useState<TestResult | null>(null);
   const [createBackupBeforeInit, setCreateBackupBeforeInit] = useState(true);
 
-  const [backendUrlInput, setBackendUrlInput] = useState(backendUrl);
+  // Backend connection status
+  const [backendStatus, setBackendStatus] = useState<BackendStatus>({
+    connected: false,
+    checking: true,
+    url: backendUrl
+  });
+  const [showCustomUrlConfig, setShowCustomUrlConfig] = useState(false);
+  const [customBackendUrl, setCustomBackendUrl] = useState(backendUrl);
 
   const [dbConfig, setDbConfig] = useState<DatabaseConfig>({
     host: 'localhost',
@@ -113,30 +138,68 @@ export default function Setup() {
     emailNotifications: true,
   });
 
-  const handleTestBackend = async () => {
-    setIsTesting(true);
-    setTestResult(null);
+  // Check backend connection
+  const checkBackendConnection = useCallback(async (url: string) => {
+    setBackendStatus(prev => ({ ...prev, checking: true, url }));
     
     try {
-      const response = await fetch(`${backendUrlInput}/api/health`);
+      const response = await fetch(`${url}/api/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000)
+      });
+      
       if (response.ok) {
         const data = await response.json();
-        setTestResult({ 
-          success: true, 
-          message: `Backend conectado! Versão: ${data.version}, Uptime: ${data.uptime}s` 
+        setBackendStatus({
+          connected: true,
+          checking: false,
+          version: data.version,
+          uptime: data.uptime,
+          url
         });
-        setBackendUrl(backendUrlInput);
+        setBackendUrl(url);
+        setPrefsConfig(prev => ({ ...prev, backendUrl: url }));
+        return true;
       } else {
-        setTestResult({ success: false, message: 'Backend não respondeu corretamente' });
+        setBackendStatus({
+          connected: false,
+          checking: false,
+          error: `Resposta inválida (${response.status})`,
+          url
+        });
+        return false;
       }
     } catch (error) {
-      setTestResult({ 
-        success: false, 
-        message: 'Não foi possível conectar ao backend. Verifique se o servidor está rodando.' 
+      const errorMessage = error instanceof Error ? error.message : 'Erro desconhecido';
+      setBackendStatus({
+        connected: false,
+        checking: false,
+        error: errorMessage.includes('timeout') 
+          ? 'Tempo limite excedido' 
+          : 'Não foi possível conectar',
+        url
       });
+      return false;
     }
-    
-    setIsTesting(false);
+  }, [setBackendUrl]);
+
+  // Initial connection check
+  useEffect(() => {
+    checkBackendConnection(backendUrl);
+  }, []);
+
+  const handleRetryConnection = () => {
+    checkBackendConnection(backendStatus.url);
+  };
+
+  const handleApplyCustomUrl = async () => {
+    const success = await checkBackendConnection(customBackendUrl);
+    if (success) {
+      setShowCustomUrlConfig(false);
+      toast.success('Backend conectado com sucesso!');
+    } else {
+      toast.error('Não foi possível conectar ao backend');
+    }
   };
 
   const handleTestDatabase = async () => {
@@ -222,10 +285,6 @@ export default function Setup() {
 
     try {
       if (currentStep === 0) {
-        // Backend step - just save the URL
-        setBackendUrl(backendUrlInput);
-        setPrefsConfig(prev => ({ ...prev, backendUrl: backendUrlInput }));
-      } else if (currentStep === 1) {
         // Database step - must be initialized
         if (!initResult?.success) {
           toast.error('Por favor, inicialize o banco de dados antes de continuar');
@@ -233,9 +292,9 @@ export default function Setup() {
           return;
         }
         await updateDatabaseConfig(dbConfig);
-      } else if (currentStep === 2) {
+      } else if (currentStep === 1) {
         await updateSmtpConfig(smtpConfig);
-      } else if (currentStep === 3) {
+      } else if (currentStep === 2) {
         if (adminConfig.password !== adminConfig.confirmPassword) {
           toast.error('As senhas não coincidem');
           setIsLoading(false);
@@ -247,7 +306,7 @@ export default function Setup() {
           return;
         }
         await register(adminConfig.email, adminConfig.password, adminConfig.name);
-      } else if (currentStep === 4) {
+      } else if (currentStep === 3) {
         await updatePreferences(prefsConfig);
         await completeSetup();
         toast.success('Configuração concluída com sucesso!');
@@ -270,69 +329,142 @@ export default function Setup() {
   };
 
   const canProceed = () => {
+    // Can't proceed if backend is not connected
+    if (!backendStatus.connected) return false;
+
     switch (currentStep) {
       case 0:
-        return backendUrlInput.length > 0;
-      case 1:
         return initResult?.success === true;
-      case 2:
+      case 1:
         return true; // SMTP is optional
-      case 3:
+      case 2:
         return adminConfig.email && adminConfig.password && adminConfig.name && 
                adminConfig.password === adminConfig.confirmPassword;
-      case 4:
+      case 3:
         return prefsConfig.companyName.length > 0;
       default:
         return true;
     }
   };
 
-  const renderStepContent = () => {
-    switch (currentStep) {
-      case 0:
-        return (
-          <div className="space-y-4">
-            <Alert>
-              <Server className="h-4 w-4" />
-              <AlertDescription>
-                Configure a URL do servidor backend Node.js. Este servidor é responsável pelo envio de emails e comunicação com o banco de dados.
-              </AlertDescription>
-            </Alert>
-            
-            <div className="space-y-2">
-              <Label htmlFor="backend-url">URL do Backend</Label>
-              <Input
-                id="backend-url"
-                value={backendUrlInput}
-                onChange={(e) => setBackendUrlInput(e.target.value)}
-                placeholder="http://localhost:3001"
-              />
-              <p className="text-xs text-muted-foreground">
-                Exemplo: http://localhost:3001 ou https://api.seudominio.com
-              </p>
+  // Backend Status Banner Component
+  const BackendStatusBanner = () => (
+    <div className={`rounded-lg border p-3 mb-4 transition-colors ${
+      backendStatus.connected 
+        ? 'bg-status-completed/10 border-status-completed/30' 
+        : 'bg-destructive/10 border-destructive/30'
+    }`}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          {backendStatus.checking ? (
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          ) : backendStatus.connected ? (
+            <Wifi className="h-5 w-5 text-status-completed" />
+          ) : (
+            <WifiOff className="h-5 w-5 text-destructive" />
+          )}
+          
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className={`font-medium text-sm ${
+                backendStatus.connected ? 'text-status-completed' : 'text-destructive'
+              }`}>
+                {backendStatus.checking 
+                  ? 'Verificando conexão...' 
+                  : backendStatus.connected 
+                    ? 'Backend conectado' 
+                    : 'Backend desconectado'}
+              </span>
+              {backendStatus.connected && backendStatus.version && (
+                <span className="text-xs text-muted-foreground">
+                  v{backendStatus.version}
+                </span>
+              )}
             </div>
+            <p className="text-xs text-muted-foreground truncate">
+              {backendStatus.url || 'URL automática'}
+            </p>
+          </div>
+        </div>
 
+        <div className="flex items-center gap-2">
+          {!backendStatus.connected && !backendStatus.checking && (
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={handleRetryConnection}
+              className="h-8"
+            >
+              <RefreshCw className="h-4 w-4 mr-1" />
+              Tentar novamente
+            </Button>
+          )}
+          
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowCustomUrlConfig(!showCustomUrlConfig)}
+            className="h-8"
+          >
+            <SettingsIcon className="h-4 w-4" />
+          </Button>
+        </div>
+      </div>
+
+      {/* Error message */}
+      {!backendStatus.connected && !backendStatus.checking && backendStatus.error && (
+        <p className="text-xs text-destructive mt-2 flex items-center gap-1">
+          <AlertCircle className="h-3 w-3" />
+          {backendStatus.error}
+        </p>
+      )}
+
+      {/* Custom URL configuration */}
+      <Collapsible open={showCustomUrlConfig} onOpenChange={setShowCustomUrlConfig}>
+        <CollapsibleContent className="mt-3 pt-3 border-t border-border/50">
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Server className="h-3 w-3" />
+              <span>Configurar URL personalizada do backend</span>
+            </div>
+            
             <div className="flex gap-2">
-              <Button type="button" variant="outline" onClick={handleTestBackend} disabled={isTesting}>
-                {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Testar Conexão
+              <Input
+                value={customBackendUrl}
+                onChange={(e) => setCustomBackendUrl(e.target.value)}
+                placeholder="http://localhost:3001 ou https://api.seudominio.com"
+                className="h-9 text-sm"
+              />
+              <Button 
+                onClick={handleApplyCustomUrl}
+                disabled={backendStatus.checking || !customBackendUrl}
+                size="sm"
+                className="h-9"
+              >
+                {backendStatus.checking ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                <span className="ml-1">Aplicar</span>
               </Button>
             </div>
 
-            {testResult && (
-              <Alert variant={testResult.success ? "default" : "destructive"}>
-                {testResult.success ? (
-                  <Check className="h-4 w-4" />
-                ) : (
-                  <AlertCircle className="h-4 w-4" />
-                )}
-                <AlertDescription>{testResult.message}</AlertDescription>
-              </Alert>
-            )}
+            <div className="text-xs text-muted-foreground">
+              <p className="flex items-center gap-1">
+                <ExternalLink className="h-3 w-3" />
+                Deixe vazio para usar URL relativa (recomendado em produção com nginx)
+              </p>
+            </div>
           </div>
-        );
+        </CollapsibleContent>
+      </Collapsible>
+    </div>
+  );
 
-      case 1:
+  const renderStepContent = () => {
+    switch (currentStep) {
+      case 0:
         return (
           <div className="space-y-4">
             <Alert>
@@ -350,6 +482,7 @@ export default function Setup() {
                   value={dbConfig.host}
                   onChange={(e) => setDbConfig({ ...dbConfig, host: e.target.value })}
                   placeholder="localhost ou IP"
+                  disabled={!backendStatus.connected}
                 />
               </div>
               <div className="space-y-2">
@@ -359,6 +492,7 @@ export default function Setup() {
                   type="number"
                   value={dbConfig.port}
                   onChange={(e) => setDbConfig({ ...dbConfig, port: parseInt(e.target.value) })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
@@ -369,6 +503,7 @@ export default function Setup() {
                 value={dbConfig.database}
                 onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })}
                 placeholder="conferencia_app"
+                disabled={!backendStatus.connected}
               />
               <p className="text-xs text-muted-foreground">
                 Se o banco não existir, ele será criado automaticamente.
@@ -382,6 +517,7 @@ export default function Setup() {
                   value={dbConfig.username}
                   onChange={(e) => setDbConfig({ ...dbConfig, username: e.target.value })}
                   placeholder="postgres"
+                  disabled={!backendStatus.connected}
                 />
               </div>
               <div className="space-y-2">
@@ -391,6 +527,7 @@ export default function Setup() {
                   type="password"
                   value={dbConfig.password}
                   onChange={(e) => setDbConfig({ ...dbConfig, password: e.target.value })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
@@ -416,14 +553,19 @@ export default function Setup() {
             )}
 
             <div className="flex gap-2 flex-wrap">
-              <Button type="button" variant="outline" onClick={handleTestDatabase} disabled={isTesting || isInitializing}>
+              <Button 
+                type="button" 
+                variant="outline" 
+                onClick={handleTestDatabase} 
+                disabled={isTesting || isInitializing || !backendStatus.connected}
+              >
                 {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 1. Testar Conexão
               </Button>
               <Button 
                 type="button" 
                 onClick={handleInitializeDatabase} 
-                disabled={isInitializing || isTesting || !testResult?.success}
+                disabled={isInitializing || isTesting || !testResult?.success || !backendStatus.connected}
               >
                 {isInitializing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 2. Criar Banco e Tabelas
@@ -433,7 +575,7 @@ export default function Setup() {
                   type="button" 
                   variant="outline"
                   onClick={handleCreateBackup} 
-                  disabled={isBackingUp || isInitializing}
+                  disabled={isBackingUp || isInitializing || !backendStatus.connected}
                 >
                   {isBackingUp && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   <Download className="mr-2 h-4 w-4" />
@@ -497,7 +639,6 @@ export default function Setup() {
                 )}
                 <AlertDescription>
                   {initResult.message}
-                  
                   {initResult.schemaVersion && (
                     <div className="mt-1 text-xs text-muted-foreground">
                       Versão do schema: {initResult.schemaVersion}
@@ -539,7 +680,7 @@ export default function Setup() {
           </div>
         );
 
-      case 2:
+      case 1:
         return (
           <div className="space-y-4">
             <Alert>
@@ -557,6 +698,7 @@ export default function Setup() {
                   value={smtpConfig.host}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, host: e.target.value })}
                   placeholder="smtp.gmail.com"
+                  disabled={!backendStatus.connected}
                 />
               </div>
               <div className="space-y-2">
@@ -566,6 +708,7 @@ export default function Setup() {
                   type="number"
                   value={smtpConfig.port}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, port: parseInt(e.target.value) })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
@@ -577,6 +720,7 @@ export default function Setup() {
                   value={smtpConfig.username}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, username: e.target.value })}
                   placeholder="seu@email.com"
+                  disabled={!backendStatus.connected}
                 />
               </div>
               <div className="space-y-2">
@@ -586,6 +730,7 @@ export default function Setup() {
                   type="password"
                   value={smtpConfig.password}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, password: e.target.value })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
@@ -598,6 +743,7 @@ export default function Setup() {
                   value={smtpConfig.fromEmail}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, fromEmail: e.target.value })}
                   placeholder="noreply@empresa.com"
+                  disabled={!backendStatus.connected}
                 />
               </div>
               <div className="space-y-2">
@@ -606,12 +752,18 @@ export default function Setup() {
                   id="smtp-from-name"
                   value={smtpConfig.fromName}
                   onChange={(e) => setSmtpConfig({ ...smtpConfig, fromName: e.target.value })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
             
             {smtpConfig.host && (
-              <Button type="button" variant="outline" onClick={handleTestSmtp} disabled={isTesting}>
+              <Button 
+                type="button" 
+                variant="outline" 
+                onClick={handleTestSmtp} 
+                disabled={isTesting || !backendStatus.connected}
+              >
                 {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Testar Conexão SMTP
               </Button>
@@ -630,7 +782,7 @@ export default function Setup() {
           </div>
         );
 
-      case 3:
+      case 2:
         return (
           <div className="space-y-4">
             <Alert>
@@ -647,6 +799,7 @@ export default function Setup() {
                 value={adminConfig.name}
                 onChange={(e) => setAdminConfig({ ...adminConfig, name: e.target.value })}
                 placeholder="Seu nome"
+                disabled={!backendStatus.connected}
               />
             </div>
             <div className="space-y-2">
@@ -657,6 +810,7 @@ export default function Setup() {
                 value={adminConfig.email}
                 onChange={(e) => setAdminConfig({ ...adminConfig, email: e.target.value })}
                 placeholder="admin@empresa.com"
+                disabled={!backendStatus.connected}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -667,6 +821,7 @@ export default function Setup() {
                   type="password"
                   value={adminConfig.password}
                   onChange={(e) => setAdminConfig({ ...adminConfig, password: e.target.value })}
+                  disabled={!backendStatus.connected}
                 />
                 <p className="text-xs text-muted-foreground">Mínimo 6 caracteres</p>
               </div>
@@ -677,6 +832,7 @@ export default function Setup() {
                   type="password"
                   value={adminConfig.confirmPassword}
                   onChange={(e) => setAdminConfig({ ...adminConfig, confirmPassword: e.target.value })}
+                  disabled={!backendStatus.connected}
                 />
               </div>
             </div>
@@ -690,7 +846,7 @@ export default function Setup() {
           </div>
         );
 
-      case 4:
+      case 3:
         return (
           <div className="space-y-4">
             <div className="space-y-2">
@@ -700,6 +856,7 @@ export default function Setup() {
                 value={prefsConfig.companyName}
                 onChange={(e) => setPrefsConfig({ ...prefsConfig, companyName: e.target.value })}
                 placeholder="Minha Empresa"
+                disabled={!backendStatus.connected}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -707,9 +864,10 @@ export default function Setup() {
                 <Label htmlFor="pref-theme">Tema Padrão</Label>
                 <select
                   id="pref-theme"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                   value={prefsConfig.theme}
                   onChange={(e) => setPrefsConfig({ ...prefsConfig, theme: e.target.value as 'light' | 'dark' | 'system' })}
+                  disabled={!backendStatus.connected}
                 >
                   <option value="system">Sistema</option>
                   <option value="light">Claro</option>
@@ -720,9 +878,10 @@ export default function Setup() {
                 <Label htmlFor="pref-timezone">Fuso Horário</Label>
                 <select
                   id="pref-timezone"
-                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                   value={prefsConfig.timezone}
                   onChange={(e) => setPrefsConfig({ ...prefsConfig, timezone: e.target.value })}
+                  disabled={!backendStatus.connected}
                 >
                   <option value="America/Sao_Paulo">Brasília (GMT-3)</option>
                   <option value="America/Manaus">Manaus (GMT-4)</option>
@@ -740,6 +899,7 @@ export default function Setup() {
                   checked={prefsConfig.emailNotifications ?? true}
                   onChange={(e) => setPrefsConfig({ ...prefsConfig, emailNotifications: e.target.checked })}
                   className="h-4 w-4 rounded border-input"
+                  disabled={!backendStatus.connected}
                 />
                 <Label htmlFor="pref-email-notifications" className="text-sm font-normal">
                   Ativar notificações por email ao criar conferências
@@ -768,6 +928,9 @@ export default function Setup() {
           <h1 className="text-3xl font-bold">Configuração Inicial</h1>
           <p className="text-muted-foreground mt-2">Configure o sistema para começar a usar</p>
         </div>
+
+        {/* Backend Status Banner - Always visible */}
+        <BackendStatusBanner />
 
         {/* Steps indicator */}
         <div className="flex items-center justify-center gap-1 sm:gap-2">
