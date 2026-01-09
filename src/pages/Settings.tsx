@@ -24,6 +24,7 @@ import {
   Users,
   FileText,
   Shield,
+  BellRing,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
 import { ReminderSettings } from '@/components/settings/ReminderSettings';
@@ -31,6 +32,7 @@ import { ApiKeyManager } from '@/components/settings/ApiKeyManager';
 import { UserManager } from '@/components/settings/UserManager';
 import { AuditLogViewer } from '@/components/settings/AuditLogViewer';
 import { SecurityAlerts } from '@/components/settings/SecurityAlerts';
+import { AlertNotificationSettings } from '@/components/settings/AlertNotificationSettings';
 
 export default function Settings() {
   const { user } = useAuth();
@@ -160,6 +162,12 @@ export default function Settings() {
             <TabsTrigger value="security-alerts" className="flex items-center gap-2">
               <Shield className="h-4 w-4" />
               Alertas
+            </TabsTrigger>
+          )}
+          {user?.role === 'admin' && (
+            <TabsTrigger value="notifications" className="flex items-center gap-2">
+              <BellRing className="h-4 w-4" />
+              Notificações
             </TabsTrigger>
           )}
           {user?.role === 'admin' && (
@@ -334,6 +342,12 @@ export default function Settings() {
         {user?.role === 'admin' && (
           <TabsContent value="security-alerts">
             <SecurityAlerts backendUrl={preferences.backendUrl || ''} />
+          </TabsContent>
+        )}
+
+        {user?.role === 'admin' && (
+          <TabsContent value="notifications">
+            <AlertNotificationSettings backendUrl={preferences.backendUrl || ''} />
           </TabsContent>
         )}
 
