@@ -3,7 +3,8 @@ import { SidebarProvider } from '@/components/ui/sidebar';
 import { AppSidebar } from './AppSidebar';
 import { AppHeader } from './AppHeader';
 import { useConferences } from '@/hooks/useConferences';
-import { useNotifications } from '@/hooks/useNotifications';
+import { useConferenceNotifications } from '@/hooks/useNotifications';
+import { useNotifications } from '@/contexts/NotificationContext';
 
 interface AppLayoutProps {
   children: ReactNode;
@@ -11,9 +12,13 @@ interface AppLayoutProps {
 
 export function AppLayout({ children }: AppLayoutProps) {
   const { allConferences } = useConferences();
+  const notificationCenter = useNotifications();
   
-  // Initialize real-time notifications
-  useNotifications(allConferences);
+  // Initialize real-time notifications with notification center integration
+  useConferenceNotifications(allConferences, undefined, {
+    addNotification: notificationCenter.addNotification,
+    playSound: notificationCenter.playSound,
+  });
 
   return (
     <SidebarProvider>

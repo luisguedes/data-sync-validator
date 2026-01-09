@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { AppSettingsProvider } from "@/contexts/AppSettingsContext";
+import { NotificationProvider } from "@/contexts/NotificationContext";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { ProtectedRoute, PublicRoute, SetupRoute } from "@/components/auth/ProtectedRoute";
 
@@ -28,8 +29,9 @@ const App = () => (
     <TooltipProvider>
       <AuthProvider>
         <AppSettingsProvider>
-          <Toaster />
-          <Sonner />
+          <NotificationProvider>
+            <Toaster />
+            <Sonner />
           <BrowserRouter>
             <Routes>
               {/* Public routes */}
@@ -165,6 +167,7 @@ const App = () => (
               <Route path="*" element={<NotFound />} />
             </Routes>
           </BrowserRouter>
+          </NotificationProvider>
         </AppSettingsProvider>
       </AuthProvider>
     </TooltipProvider>
