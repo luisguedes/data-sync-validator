@@ -12,8 +12,11 @@ const app = express();
 // JWT Configuration (local, no external dependencies)
 // ============================================
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
-const JWT_EXPIRY = process.env.JWT_EXPIRY || '24h';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '15m'; // Short-lived access token
+const JWT_REFRESH_EXPIRY = process.env.JWT_REFRESH_EXPIRY || '7d'; // Long-lived refresh token
 const USERS_FILE = process.env.USERS_FILE || './users.json';
+const REFRESH_TOKENS_FILE = process.env.REFRESH_TOKENS_FILE || './refresh-tokens.json';
 
 // Simple JWT implementation (no external dependencies)
 const base64UrlEncode = (str) => {
@@ -29,19 +32,20 @@ const base64UrlDecode = (str) => {
   return Buffer.from(str, 'base64').toString();
 };
 
-const createJwt = (payload) => {
+const createJwt = (payload, secret = JWT_SECRET, expiry = JWT_EXPIRY) => {
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
   
-  // Parse expiry string (e.g., '24h', '7d')
+  // Parse expiry string (e.g., '24h', '7d', '15m')
   let expirySeconds = 24 * 60 * 60; // Default 24h
-  const expiryMatch = JWT_EXPIRY.match(/^(\d+)([hdm])$/);
+  const expiryMatch = expiry.match(/^(\d+)([hdms])$/);
   if (expiryMatch) {
     const value = parseInt(expiryMatch[1]);
     const unit = expiryMatch[2];
     if (unit === 'h') expirySeconds = value * 60 * 60;
     else if (unit === 'd') expirySeconds = value * 24 * 60 * 60;
     else if (unit === 'm') expirySeconds = value * 60;
+    else if (unit === 's') expirySeconds = value;
   }
   
   const fullPayload = {
@@ -53,7 +57,7 @@ const createJwt = (payload) => {
   const headerB64 = base64UrlEncode(JSON.stringify(header));
   const payloadB64 = base64UrlEncode(JSON.stringify(fullPayload));
   const signature = crypto
-    .createHmac('sha256', JWT_SECRET)
+    .createHmac('sha256', secret)
     .update(`${headerB64}.${payloadB64}`)
     .digest('base64')
     .replace(/\+/g, '-')
@@ -63,12 +67,12 @@ const createJwt = (payload) => {
   return `${headerB64}.${payloadB64}.${signature}`;
 };
 
-const verifyJwt = (token) => {
+const verifyJwt = (token, secret = JWT_SECRET) => {
   try {
     const [headerB64, payloadB64, signature] = token.split('.');
     
     const expectedSignature = crypto
-      .createHmac('sha256', JWT_SECRET)
+      .createHmac('sha256', secret)
       .update(`${headerB64}.${payloadB64}`)
       .digest('base64')
       .replace(/\+/g, '-')
@@ -91,6 +95,80 @@ const verifyJwt = (token) => {
     return null;
   }
 };
+
+// ============================================
+// Refresh Token Management
+// ============================================
+let refreshTokens = [];
+
+const loadRefreshTokens = () => {
+  try {
+    if (fs.existsSync(REFRESH_TOKENS_FILE)) {
+      const data = fs.readFileSync(REFRESH_TOKENS_FILE, 'utf8');
+      refreshTokens = JSON.parse(data);
+      // Clean expired tokens on load
+      const now = Date.now();
+      refreshTokens = refreshTokens.filter(t => t.expiresAt > now);
+      console.log(`🔄 Loaded ${refreshTokens.length} valid refresh token(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Error loading refresh tokens:', error.message);
+  }
+};
+
+const saveRefreshTokens = () => {
+  try {
+    fs.writeFileSync(REFRESH_TOKENS_FILE, JSON.stringify(refreshTokens, null, 2));
+  } catch (error) {
+    console.error('❌ Error saving refresh tokens:', error.message);
+  }
+};
+
+const createRefreshToken = (userId) => {
+  const token = crypto.randomBytes(64).toString('hex');
+  const expiresAt = Date.now() + (7 * 24 * 60 * 60 * 1000); // 7 days
+  
+  // Remove old tokens for this user (max 5 sessions)
+  const userTokens = refreshTokens.filter(t => t.userId === userId);
+  if (userTokens.length >= 5) {
+    const oldestToken = userTokens.sort((a, b) => a.createdAt - b.createdAt)[0];
+    refreshTokens = refreshTokens.filter(t => t.token !== oldestToken.token);
+  }
+  
+  refreshTokens.push({
+    token,
+    userId,
+    expiresAt,
+    createdAt: Date.now(),
+  });
+  
+  saveRefreshTokens();
+  return token;
+};
+
+const verifyRefreshToken = (token) => {
+  const tokenData = refreshTokens.find(t => t.token === token);
+  if (!tokenData) return null;
+  if (tokenData.expiresAt < Date.now()) {
+    // Token expired, remove it
+    refreshTokens = refreshTokens.filter(t => t.token !== token);
+    saveRefreshTokens();
+    return null;
+  }
+  return tokenData;
+};
+
+const revokeRefreshToken = (token) => {
+  refreshTokens = refreshTokens.filter(t => t.token !== token);
+  saveRefreshTokens();
+};
+
+const revokeAllUserTokens = (userId) => {
+  refreshTokens = refreshTokens.filter(t => t.userId !== userId);
+  saveRefreshTokens();
+};
+
+loadRefreshTokens();
 
 // ============================================
 // User Management
@@ -563,18 +641,24 @@ app.post('/api/auth/login', (req, res) => {
   user.lastLoginAt = new Date().toISOString();
   saveUsers();
   
-  const token = createJwt({
+  // Create access token (short-lived)
+  const accessToken = createJwt({
     sub: user.id,
     email: user.email,
     name: user.name,
     role: user.role,
-  });
+  }, JWT_SECRET, JWT_EXPIRY);
+  
+  // Create refresh token (long-lived)
+  const refreshToken = createRefreshToken(user.id);
   
   console.log(`🔓 User logged in: ${user.email}`);
   
   res.json({
     success: true,
-    token,
+    accessToken,
+    refreshToken,
+    expiresIn: JWT_EXPIRY,
     user: {
       id: user.id,
       email: user.email,
@@ -645,18 +729,22 @@ app.post('/api/auth/register', (req, res) => {
   users.push(newUser);
   saveUsers();
   
-  const token = createJwt({
+  const accessToken = createJwt({
     sub: newUser.id,
     email: newUser.email,
     name: newUser.name,
     role: newUser.role,
-  });
+  }, JWT_SECRET, JWT_EXPIRY);
+  
+  const refreshToken = createRefreshToken(newUser.id);
   
   console.log(`👤 New user registered: ${newUser.email}`);
   
   res.status(201).json({
     success: true,
-    token,
+    accessToken,
+    refreshToken,
+    expiresIn: JWT_EXPIRY,
     user: {
       id: newUser.id,
       email: newUser.email,
@@ -694,6 +782,72 @@ app.get('/api/auth/me', (req, res) => {
       createdAt: user.createdAt,
       lastLoginAt: user.lastLoginAt,
     },
+  });
+});
+
+// Refresh token endpoint
+app.post('/api/auth/refresh', (req, res) => {
+  const { refreshToken } = req.body;
+  
+  if (!refreshToken) {
+    return res.status(400).json({
+      success: false,
+      message: 'Refresh token é obrigatório',
+    });
+  }
+  
+  const tokenData = verifyRefreshToken(refreshToken);
+  
+  if (!tokenData) {
+    return res.status(401).json({
+      success: false,
+      message: 'Refresh token inválido ou expirado',
+    });
+  }
+  
+  const user = users.find(u => u.id === tokenData.userId);
+  
+  if (!user || !user.active) {
+    revokeRefreshToken(refreshToken);
+    return res.status(401).json({
+      success: false,
+      message: 'Usuário não encontrado ou desativado',
+    });
+  }
+  
+  // Create new access token
+  const accessToken = createJwt({
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+  }, JWT_SECRET, JWT_EXPIRY);
+  
+  console.log(`🔄 Token refreshed for: ${user.email}`);
+  
+  res.json({
+    success: true,
+    accessToken,
+    expiresIn: JWT_EXPIRY,
+  });
+});
+
+// Logout endpoint (revoke refresh token)
+app.post('/api/auth/logout', (req, res) => {
+  const { refreshToken } = req.body;
+  
+  if (refreshToken) {
+    revokeRefreshToken(refreshToken);
+  }
+  
+  // Also revoke all tokens if requested
+  if (req.body.revokeAll && req.user) {
+    revokeAllUserTokens(req.user.sub);
+  }
+  
+  res.json({
+    success: true,
+    message: 'Logout realizado com sucesso',
   });
 });
 
