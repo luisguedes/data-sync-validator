@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Bell, Check, CheckCheck, Trash2, Volume2, VolumeX, X, AlertCircle, AlertTriangle, Info, CheckCircle, Filter } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useNotifications } from '@/contexts/NotificationContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { formatDistanceToNow, isAfter, subHours, subDays, subWeeks } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
@@ -50,6 +51,14 @@ const periodOptions = [
   { value: '30d', label: 'Últimos 30 dias' },
 ];
 
+interface FilterPreferences {
+  typeFilter: string;
+  periodFilter: string;
+  showFilters: boolean;
+}
+
+const getStorageKey = (userId: string) => `notification_filter_prefs_${userId}`;
+
 export function NotificationCenter() {
   const {
     notifications,
@@ -62,9 +71,42 @@ export function NotificationCenter() {
     toggleSound,
   } = useNotifications();
 
+  const { user } = useAuth();
+
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [periodFilter, setPeriodFilter] = useState<string>('all');
   const [showFilters, setShowFilters] = useState(false);
+  const [isInitialized, setIsInitialized] = useState(false);
+
+  // Load preferences from localStorage on mount
+  useEffect(() => {
+    if (user?.id) {
+      try {
+        const stored = localStorage.getItem(getStorageKey(user.id));
+        if (stored) {
+          const prefs: FilterPreferences = JSON.parse(stored);
+          setTypeFilter(prefs.typeFilter || 'all');
+          setPeriodFilter(prefs.periodFilter || 'all');
+          setShowFilters(prefs.showFilters || false);
+        }
+      } catch {
+        // Ignore parsing errors
+      }
+      setIsInitialized(true);
+    }
+  }, [user?.id]);
+
+  // Save preferences to localStorage when they change
+  useEffect(() => {
+    if (user?.id && isInitialized) {
+      const prefs: FilterPreferences = {
+        typeFilter,
+        periodFilter,
+        showFilters,
+      };
+      localStorage.setItem(getStorageKey(user.id), JSON.stringify(prefs));
+    }
+  }, [user?.id, typeFilter, periodFilter, showFilters, isInitialized]);
 
   const filteredNotifications = useMemo(() => {
     return notifications.filter((notification) => {
