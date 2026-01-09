@@ -2071,6 +2071,173 @@ app.post('/api/audit-logs', (req, res) => {
 });
 
 // ============================================
+// Security Dashboard / Metrics Endpoint
+// ============================================
+
+app.get('/api/security/dashboard', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem acessar o dashboard',
+    });
+  }
+  
+  const now = Date.now();
+  const oneDayAgo = now - (24 * 60 * 60 * 1000);
+  const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = now - (30 * 24 * 60 * 60 * 1000);
+  
+  // Alert statistics
+  const alertStats = {
+    total: securityAlerts.length,
+    unacknowledged: securityAlerts.filter(a => !a.acknowledged).length,
+    critical: securityAlerts.filter(a => a.severity === ALERT_SEVERITY.CRITICAL && !a.acknowledged).length,
+    high: securityAlerts.filter(a => a.severity === ALERT_SEVERITY.HIGH && !a.acknowledged).length,
+    medium: securityAlerts.filter(a => a.severity === ALERT_SEVERITY.MEDIUM && !a.acknowledged).length,
+    low: securityAlerts.filter(a => a.severity === ALERT_SEVERITY.LOW && !a.acknowledged).length,
+    last24h: securityAlerts.filter(a => new Date(a.timestamp).getTime() >= oneDayAgo).length,
+    last7d: securityAlerts.filter(a => new Date(a.timestamp).getTime() >= sevenDaysAgo).length,
+  };
+  
+  // Login statistics from audit logs
+  const loginLogs = auditLogs.filter(l => 
+    l.action === AUDIT_ACTIONS.LOGIN_SUCCESS || l.action === AUDIT_ACTIONS.LOGIN_FAILED
+  );
+  
+  const loginStats = {
+    successful24h: loginLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.LOGIN_SUCCESS && 
+      new Date(l.timestamp).getTime() >= oneDayAgo
+    ).length,
+    failed24h: loginLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.LOGIN_FAILED && 
+      new Date(l.timestamp).getTime() >= oneDayAgo
+    ).length,
+    successful7d: loginLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.LOGIN_SUCCESS && 
+      new Date(l.timestamp).getTime() >= sevenDaysAgo
+    ).length,
+    failed7d: loginLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.LOGIN_FAILED && 
+      new Date(l.timestamp).getTime() >= sevenDaysAgo
+    ).length,
+    uniqueIPs24h: [...new Set(loginLogs
+      .filter(l => new Date(l.timestamp).getTime() >= oneDayAgo)
+      .map(l => l.ip)
+    )].length,
+  };
+  
+  // Email statistics
+  const emailLogs = auditLogs.filter(l => 
+    l.action === AUDIT_ACTIONS.EMAIL_SENT || l.action === AUDIT_ACTIONS.EMAIL_FAILED
+  );
+  
+  const emailStats = {
+    sent24h: emailLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.EMAIL_SENT && 
+      new Date(l.timestamp).getTime() >= oneDayAgo
+    ).length,
+    failed24h: emailLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.EMAIL_FAILED && 
+      new Date(l.timestamp).getTime() >= oneDayAgo
+    ).length,
+    sent7d: emailLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.EMAIL_SENT && 
+      new Date(l.timestamp).getTime() >= sevenDaysAgo
+    ).length,
+    failed7d: emailLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.EMAIL_FAILED && 
+      new Date(l.timestamp).getTime() >= sevenDaysAgo
+    ).length,
+  };
+  
+  // User statistics
+  const userStats = {
+    total: users.length,
+    active: users.filter(u => u.active).length,
+    admins: users.filter(u => u.role === 'admin').length,
+    newLast7d: users.filter(u => new Date(u.createdAt).getTime() >= sevenDaysAgo).length,
+  };
+  
+  // Activity timeline (last 24h, grouped by hour)
+  const activityTimeline = [];
+  for (let i = 23; i >= 0; i--) {
+    const hourStart = now - ((i + 1) * 60 * 60 * 1000);
+    const hourEnd = now - (i * 60 * 60 * 1000);
+    
+    const logins = loginLogs.filter(l => {
+      const t = new Date(l.timestamp).getTime();
+      return t >= hourStart && t < hourEnd && l.action === AUDIT_ACTIONS.LOGIN_SUCCESS;
+    }).length;
+    
+    const failures = loginLogs.filter(l => {
+      const t = new Date(l.timestamp).getTime();
+      return t >= hourStart && t < hourEnd && l.action === AUDIT_ACTIONS.LOGIN_FAILED;
+    }).length;
+    
+    const alerts = securityAlerts.filter(a => {
+      const t = new Date(a.timestamp).getTime();
+      return t >= hourStart && t < hourEnd;
+    }).length;
+    
+    activityTimeline.push({
+      hour: new Date(hourEnd).toISOString(),
+      logins,
+      failures,
+      alerts,
+    });
+  }
+  
+  // Recent activity
+  const recentActivity = auditLogs
+    .filter(l => new Date(l.timestamp).getTime() >= oneDayAgo)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 20)
+    .map(l => ({
+      id: l.id,
+      action: l.action,
+      userEmail: l.userEmail,
+      timestamp: l.timestamp,
+      success: l.success,
+      ip: l.ip,
+    }));
+  
+  // Top IPs with failed logins
+  const failedLoginIPs = {};
+  loginLogs
+    .filter(l => l.action === AUDIT_ACTIONS.LOGIN_FAILED && new Date(l.timestamp).getTime() >= sevenDaysAgo)
+    .forEach(l => {
+      failedLoginIPs[l.ip] = (failedLoginIPs[l.ip] || 0) + 1;
+    });
+  
+  const topFailedIPs = Object.entries(failedLoginIPs)
+    .map(([ip, count]) => ({ ip, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+  
+  // Latest alerts
+  const latestAlerts = securityAlerts
+    .filter(a => !a.acknowledged)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 5);
+  
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    alertStats,
+    loginStats,
+    emailStats,
+    userStats,
+    activityTimeline,
+    recentActivity,
+    topFailedIPs,
+    latestAlerts,
+  });
+});
+
+// ============================================
 // Security Alerts Endpoints
 // ============================================
 

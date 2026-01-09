@@ -25,6 +25,7 @@ import {
   FileText,
   Shield,
   BellRing,
+  Activity,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
 import { ReminderSettings } from '@/components/settings/ReminderSettings';
@@ -33,6 +34,7 @@ import { UserManager } from '@/components/settings/UserManager';
 import { AuditLogViewer } from '@/components/settings/AuditLogViewer';
 import { SecurityAlerts } from '@/components/settings/SecurityAlerts';
 import { AlertNotificationSettings } from '@/components/settings/AlertNotificationSettings';
+import { SecurityDashboard } from '@/components/settings/SecurityDashboard';
 
 export default function Settings() {
   const { user } = useAuth();
@@ -152,6 +154,12 @@ export default function Settings() {
         <TabsList className="flex-wrap h-auto gap-1">
           <TabsTrigger value="general">Geral</TabsTrigger>
           <TabsTrigger value="backend">Backend Local</TabsTrigger>
+          {user?.role === 'admin' && (
+            <TabsTrigger value="dashboard" className="flex items-center gap-2">
+              <Activity className="h-4 w-4" />
+              Dashboard
+            </TabsTrigger>
+          )}
           {user?.role === 'admin' && (
             <TabsTrigger value="users" className="flex items-center gap-2">
               <Users className="h-4 w-4" />
@@ -332,6 +340,12 @@ export default function Settings() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {user?.role === 'admin' && (
+          <TabsContent value="dashboard">
+            <SecurityDashboard backendUrl={preferences.backendUrl || ''} />
+          </TabsContent>
+        )}
 
         {user?.role === 'admin' && (
           <TabsContent value="users">
