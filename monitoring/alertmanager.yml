@@ -1,60 +1,109 @@
-# Alertmanager Configuration
+# Alertmanager Configuration with Slack Notifications
 
 global:
-  # Email configuration (optional)
-  # smtp_smarthost: 'smtp.example.com:587'
-  # smtp_from: 'alertmanager@example.com'
-  # smtp_auth_username: 'user'
-  # smtp_auth_password: 'password'
   resolve_timeout: 5m
+  # Slack API URL (configure via environment variable or directly)
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
 
 # Route configuration
 route:
   group_by: ['alertname', 'severity']
   group_wait: 10s
   group_interval: 10s
-  repeat_interval: 1h
-  receiver: 'default-receiver'
+  repeat_interval: 4h
+  receiver: 'slack-notifications'
   
   routes:
+    # Critical alerts - immediate notification
     - match:
         severity: critical
-      receiver: 'critical-alerts'
+      receiver: 'slack-critical'
+      group_wait: 0s
+      repeat_interval: 1h
       continue: true
+    
+    # Warning alerts
     - match:
         severity: warning
-      receiver: 'warning-alerts'
+      receiver: 'slack-warnings'
+      repeat_interval: 4h
 
 # Receivers
 receivers:
-  - name: 'default-receiver'
-    # Add your notification channels here
-    # webhook_configs:
-    #   - url: 'http://your-webhook-url'
+  # Default receiver
+  - name: 'slack-notifications'
+    slack_configs:
+      - channel: '#monitoring'
+        send_resolved: true
+        title: '{{ if eq .Status "firing" }}🔥{{ else }}✅{{ end }} {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          *Status:* {{ .Status }}
+          {{ end }}
+        color: '{{ if eq .Status "firing" }}{{ if eq .CommonLabels.severity "critical" }}danger{{ else }}warning{{ end }}{{ else }}good{{ end }}'
+        actions:
+          - type: button
+            text: 'View in Prometheus 📊'
+            url: 'http://localhost:9090/alerts'
+          - type: button
+            text: 'View in Grafana 📈'
+            url: 'http://localhost:3000/d/email-backend'
 
-  - name: 'critical-alerts'
-    # Email for critical alerts
-    # email_configs:
-    #   - to: 'admin@example.com'
-    #     send_resolved: true
-    
-    # Slack for critical alerts (optional)
-    # slack_configs:
-    #   - api_url: 'https://hooks.slack.com/services/xxx/xxx/xxx'
-    #     channel: '#alerts-critical'
-    #     send_resolved: true
+  # Critical alerts - separate channel with more urgency
+  - name: 'slack-critical'
+    slack_configs:
+      - channel: '#alerts-critical'
+        send_resolved: true
+        title: '🚨 CRITICAL: {{ .CommonLabels.alertname }}'
+        text: >-
+          <!channel>
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Started:* {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+        color: 'danger'
+        actions:
+          - type: button
+            text: 'View in Prometheus 📊'
+            url: 'http://localhost:9090/alerts'
+          - type: button
+            text: 'Runbook 📖'
+            url: 'https://your-runbook-url.com'
 
-  - name: 'warning-alerts'
-    # Slack for warnings (optional)
-    # slack_configs:
-    #   - api_url: 'https://hooks.slack.com/services/xxx/xxx/xxx'
-    #     channel: '#alerts-warning'
-    #     send_resolved: true
+  # Warning alerts
+  - name: 'slack-warnings'
+    slack_configs:
+      - channel: '#alerts-warnings'
+        send_resolved: true
+        title: '⚠️ Warning: {{ .CommonLabels.alertname }}'
+        text: >-
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          {{ end }}
+        color: 'warning'
 
-# Inhibition rules
+# Inhibition rules - prevent duplicate notifications
 inhibit_rules:
+  # If critical is firing, suppress warnings for the same alert
   - source_match:
       severity: 'critical'
     target_match:
       severity: 'warning'
     equal: ['alertname']
+  
+  # If backend is down, suppress SMTP alerts
+  - source_match:
+      alertname: 'BackendDown'
+    target_match:
+      alertname: 'SMTPDisconnected'
+    equal: ['job']
+
+# Templates (optional - for custom formatting)
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
