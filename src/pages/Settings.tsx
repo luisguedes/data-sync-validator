@@ -19,10 +19,11 @@ import {
   XCircle,
   RefreshCw,
   Bell,
+  Key,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
 import { ReminderSettings } from '@/components/settings/ReminderSettings';
-
+import { ApiKeyManager } from '@/components/settings/ApiKeyManager';
 export default function Settings() {
   const { settings, updatePreferences, updateSmtpConfig, updateDatabaseConfig } = useAppSettings();
   const { testBackendConnection, testSmtpConnection, sendNewLinkNotification } = useEmailService();
@@ -137,9 +138,13 @@ export default function Settings() {
       </div>
 
       <Tabs defaultValue="general" className="space-y-4">
-        <TabsList>
+        <TabsList className="flex-wrap h-auto gap-1">
           <TabsTrigger value="general">Geral</TabsTrigger>
           <TabsTrigger value="backend">Backend Local</TabsTrigger>
+          <TabsTrigger value="api-keys" className="flex items-center gap-2">
+            <Key className="h-4 w-4" />
+            API Keys
+          </TabsTrigger>
           <TabsTrigger value="reminders" className="flex items-center gap-2">
             <Bell className="h-4 w-4" />
             Lembretes
@@ -291,6 +296,13 @@ export default function Settings() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="api-keys">
+          <ApiKeyManager 
+            backendUrl={preferences.backendUrl || ''}
+            adminApiKey={preferences.backendApiKey || ''}
+          />
         </TabsContent>
 
         <TabsContent value="reminders">
