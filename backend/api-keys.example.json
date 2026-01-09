@@ -1,0 +1,12 @@
+[
+  {
+    "id": "admin-key-1",
+    "name": "Admin Master Key",
+    "key": "CHANGE_ME_generate_with_node_e_console_log_require_crypto_randomBytes_32_toString_hex",
+    "permission": "admin",
+    "active": true,
+    "createdAt": "2024-01-01T00:00:00.000Z",
+    "lastUsedAt": null,
+    "usageCount": 0
+  }
+]
