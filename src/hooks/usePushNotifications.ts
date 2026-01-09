@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { getAuthHeaders } from '@/services/authService';
-import { useAuth } from '@/contexts/AuthContext';
+import { getAuthHeaders, parseToken, getToken } from '@/services/authService';
 
 interface SecurityAlert {
   id: string;
@@ -18,13 +17,20 @@ interface UsePushNotificationsOptions {
   onNewAlert?: (alert: SecurityAlert) => void;
 }
 
+// Get current user role from token without depending on AuthContext
+const getCurrentUserRole = (): string | null => {
+  const token = getToken();
+  if (!token) return null;
+  const parsed = parseToken(token);
+  return parsed?.role || null;
+};
+
 export function usePushNotifications({
   backendUrl,
   enabled,
   pollingInterval = 15000,
   onNewAlert,
 }: UsePushNotificationsOptions) {
-  const { user } = useAuth();
   const [isSupported, setIsSupported] = useState(false);
   const [permission, setPermission] = useState<NotificationPermission>('default');
   const [isPolling, setIsPolling] = useState(false);
@@ -104,7 +110,8 @@ export function usePushNotifications({
 
   // Fetch new alerts
   const checkForNewAlerts = useCallback(async () => {
-    if (!backendUrl || !enabled || !user || user.role !== 'admin') return;
+    const userRole = getCurrentUserRole();
+    if (!backendUrl || !enabled || userRole !== 'admin') return;
     
     try {
       const response = await fetch(
@@ -134,11 +141,12 @@ export function usePushNotifications({
     } catch (error) {
       console.error('Error checking for new alerts:', error);
     }
-  }, [backendUrl, enabled, user, showNotification, onNewAlert]);
+  }, [backendUrl, enabled, showNotification, onNewAlert]);
 
   // Start/stop polling
   useEffect(() => {
-    if (enabled && permission === 'granted' && user?.role === 'admin' && backendUrl) {
+    const userRole = getCurrentUserRole();
+    if (enabled && permission === 'granted' && userRole === 'admin' && backendUrl) {
       setIsPolling(true);
       lastCheckRef.current = new Date().toISOString();
       
@@ -156,7 +164,7 @@ export function usePushNotifications({
         setIsPolling(false);
       };
     }
-  }, [enabled, permission, user?.role, backendUrl, pollingInterval, checkForNewAlerts]);
+  }, [enabled, permission, backendUrl, pollingInterval, checkForNewAlerts]);
 
   // Register subscription with backend
   const registerSubscription = useCallback(async () => {
