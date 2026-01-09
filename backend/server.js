@@ -326,6 +326,169 @@ const saveAlerts = () => {
   }
 };
 
+// Alert notification settings (in-memory, can be persisted if needed)
+let alertNotificationSettings = {
+  emailEnabled: true,
+  emailRecipients: [], // Will be populated with admin emails
+  pushEnabled: true,
+  minSeverityForEmail: ALERT_SEVERITY.HIGH, // Only high and critical
+  minSeverityForPush: ALERT_SEVERITY.MEDIUM, // Medium and above
+};
+
+const SEVERITY_PRIORITY = {
+  [ALERT_SEVERITY.LOW]: 1,
+  [ALERT_SEVERITY.MEDIUM]: 2,
+  [ALERT_SEVERITY.HIGH]: 3,
+  [ALERT_SEVERITY.CRITICAL]: 4,
+};
+
+const shouldSendEmailAlert = (severity) => {
+  return alertNotificationSettings.emailEnabled && 
+         SEVERITY_PRIORITY[severity] >= SEVERITY_PRIORITY[alertNotificationSettings.minSeverityForEmail];
+};
+
+const shouldSendPushAlert = (severity) => {
+  return alertNotificationSettings.pushEnabled &&
+         SEVERITY_PRIORITY[severity] >= SEVERITY_PRIORITY[alertNotificationSettings.minSeverityForPush];
+};
+
+// Send alert email to admins
+const sendAlertEmail = async (alert) => {
+  try {
+    // Get all admin emails
+    const adminEmails = users
+      .filter(u => u.role === 'admin' && u.active && u.email)
+      .map(u => u.email);
+    
+    // Add custom recipients
+    const allRecipients = [...new Set([...adminEmails, ...alertNotificationSettings.emailRecipients])];
+    
+    if (allRecipients.length === 0) {
+      console.log('⚠️ No admin emails configured for alerts');
+      return;
+    }
+    
+    const severityColors = {
+      low: '#3B82F6',
+      medium: '#F59E0B',
+      high: '#F97316',
+      critical: '#EF4444',
+    };
+    
+    const severityLabels = {
+      low: 'Baixa',
+      medium: 'Média',
+      high: 'Alta',
+      critical: 'CRÍTICA',
+    };
+    
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .header { background: ${severityColors[alert.severity]}; color: white; padding: 20px; text-align: center; }
+    .header h1 { margin: 0; font-size: 18px; }
+    .content { padding: 24px; }
+    .alert-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; color: #111; }
+    .alert-description { color: #666; margin-bottom: 16px; line-height: 1.5; }
+    .details { background: #f8f9fa; border-radius: 6px; padding: 12px; margin-bottom: 16px; }
+    .details-item { font-size: 13px; color: #555; margin: 4px 0; }
+    .footer { padding: 16px 24px; background: #f8f9fa; text-align: center; font-size: 12px; color: #888; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: ${severityColors[alert.severity]}; color: white; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🚨 Alerta de Segurança - ${severityLabels[alert.severity]}</h1>
+    </div>
+    <div class="content">
+      <div class="alert-title">${alert.title}</div>
+      <div class="alert-description">${alert.description}</div>
+      <div class="details">
+        <div class="details-item"><strong>Tipo:</strong> ${alert.type}</div>
+        <div class="details-item"><strong>Severidade:</strong> <span class="badge">${severityLabels[alert.severity]}</span></div>
+        <div class="details-item"><strong>Data/Hora:</strong> ${new Date(alert.timestamp).toLocaleString('pt-BR')}</div>
+        ${alert.details.ip ? `<div class="details-item"><strong>IP:</strong> ${alert.details.ip}</div>` : ''}
+        ${alert.details.userEmail ? `<div class="details-item"><strong>Usuário:</strong> ${alert.details.userEmail}</div>` : ''}
+        ${alert.details.targetEmail ? `<div class="details-item"><strong>Alvo:</strong> ${alert.details.targetEmail}</div>` : ''}
+      </div>
+      <p style="color: #666; font-size: 13px;">Acesse o painel de administração para mais detalhes e tomar as medidas necessárias.</p>
+    </div>
+    <div class="footer">
+      Este é um email automático do sistema de segurança. Não responda.
+    </div>
+  </div>
+</body>
+</html>
+    `.trim();
+    
+    const text = `
+🚨 ALERTA DE SEGURANÇA - ${severityLabels[alert.severity]}
+
+${alert.title}
+${alert.description}
+
+Detalhes:
+- Tipo: ${alert.type}
+- Severidade: ${severityLabels[alert.severity]}
+- Data/Hora: ${new Date(alert.timestamp).toLocaleString('pt-BR')}
+${alert.details.ip ? `- IP: ${alert.details.ip}` : ''}
+${alert.details.userEmail ? `- Usuário: ${alert.details.userEmail}` : ''}
+
+Acesse o painel de administração para mais detalhes.
+    `.trim();
+    
+    // Send to all recipients
+    for (const email of allRecipients) {
+      try {
+        await transporter.sendMail({
+          from: `"Sistema de Segurança" <${process.env.SMTP_FROM || 'noreply@sistema.com'}>`,
+          to: email,
+          subject: `🚨 [${severityLabels[alert.severity]}] ${alert.title}`,
+          text,
+          html,
+        });
+        console.log(`📧 Alert email sent to ${email}`);
+      } catch (emailError) {
+        console.error(`❌ Failed to send alert email to ${email}:`, emailError.message);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error sending alert emails:', error.message);
+  }
+};
+
+// Store for push subscriptions
+let pushSubscriptions = [];
+const PUSH_SUBSCRIPTIONS_FILE = process.env.PUSH_SUBSCRIPTIONS_FILE || './push-subscriptions.json';
+
+const loadPushSubscriptions = () => {
+  try {
+    if (fs.existsSync(PUSH_SUBSCRIPTIONS_FILE)) {
+      const data = fs.readFileSync(PUSH_SUBSCRIPTIONS_FILE, 'utf8');
+      pushSubscriptions = JSON.parse(data);
+      console.log(`🔔 Loaded ${pushSubscriptions.length} push subscription(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Error loading push subscriptions:', error.message);
+  }
+};
+
+const savePushSubscriptions = () => {
+  try {
+    fs.writeFileSync(PUSH_SUBSCRIPTIONS_FILE, JSON.stringify(pushSubscriptions, null, 2));
+  } catch (error) {
+    console.error('❌ Error saving push subscriptions:', error.message);
+  }
+};
+
+loadPushSubscriptions();
+
 const createAlert = (type, severity, title, description, details = {}) => {
   const alert = {
     id: crypto.randomUUID(),
@@ -338,6 +501,8 @@ const createAlert = (type, severity, title, description, details = {}) => {
     acknowledged: false,
     acknowledgedBy: null,
     acknowledgedAt: null,
+    emailSent: false,
+    pushSent: false,
   };
   
   securityAlerts.push(alert);
@@ -351,6 +516,19 @@ const createAlert = (type, severity, title, description, details = {}) => {
     [ALERT_SEVERITY.CRITICAL]: '🔴',
   };
   console.log(`${severityEmoji[severity] || '⚠️'} [ALERT] ${severity.toUpperCase()}: ${title} - ${description}`);
+  
+  // Send email notification for high/critical alerts
+  if (shouldSendEmailAlert(severity)) {
+    setImmediate(() => sendAlertEmail(alert).then(() => {
+      alert.emailSent = true;
+      saveAlerts();
+    }));
+  }
+  
+  // Mark push as ready (actual push is handled via polling from frontend)
+  if (shouldSendPushAlert(severity)) {
+    alert.pushSent = false; // Will be set to true when client acknowledges
+  }
   
   return alert;
 };
@@ -2075,6 +2253,137 @@ app.delete('/api/alerts/old', (req, res) => {
 });
 
 // ============================================
+// Push Notification Subscription Management
+// ============================================
+
+// Register push subscription
+app.post('/api/push/subscribe', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'Autenticação necessária' });
+  }
+  
+  const { subscription, userAgent } = req.body;
+  
+  if (!subscription || !subscription.endpoint) {
+    return res.status(400).json({ success: false, message: 'Subscription inválida' });
+  }
+  
+  // Check if already subscribed
+  const existingIndex = pushSubscriptions.findIndex(s => s.endpoint === subscription.endpoint);
+  
+  if (existingIndex >= 0) {
+    // Update existing subscription
+    pushSubscriptions[existingIndex] = {
+      ...pushSubscriptions[existingIndex],
+      subscription,
+      userAgent,
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
+    // Add new subscription
+    pushSubscriptions.push({
+      id: crypto.randomUUID(),
+      userId: req.user.sub,
+      userEmail: req.user.email,
+      subscription,
+      userAgent,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  
+  savePushSubscriptions();
+  
+  res.json({
+    success: true,
+    message: 'Inscrição registrada com sucesso',
+  });
+});
+
+// Unregister push subscription
+app.post('/api/push/unsubscribe', (req, res) => {
+  const { endpoint } = req.body;
+  
+  if (!endpoint) {
+    return res.status(400).json({ success: false, message: 'Endpoint necessário' });
+  }
+  
+  const originalCount = pushSubscriptions.length;
+  pushSubscriptions = pushSubscriptions.filter(s => s.subscription.endpoint !== endpoint);
+  
+  if (pushSubscriptions.length < originalCount) {
+    savePushSubscriptions();
+    res.json({ success: true, message: 'Inscrição removida' });
+  } else {
+    res.json({ success: true, message: 'Inscrição não encontrada' });
+  }
+});
+
+// Get new alerts for push notification (polling endpoint)
+app.get('/api/alerts/new', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ success: false, message: 'Autenticação necessária' });
+  }
+  
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({ success: false, message: 'Apenas administradores' });
+  }
+  
+  const { lastCheck } = req.query;
+  const lastCheckTime = lastCheck ? new Date(lastCheck).getTime() : Date.now() - 60000;
+  
+  // Get alerts since last check that should trigger push notifications
+  const newAlerts = securityAlerts.filter(a => {
+    const alertTime = new Date(a.timestamp).getTime();
+    return alertTime > lastCheckTime && 
+           !a.acknowledged && 
+           shouldSendPushAlert(a.severity);
+  });
+  
+  res.json({
+    success: true,
+    alerts: newAlerts,
+    serverTime: new Date().toISOString(),
+  });
+});
+
+// Get/Update alert notification settings
+app.get('/api/alerts/settings', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({ success: false, message: 'Apenas administradores' });
+  }
+  
+  res.json({
+    success: true,
+    settings: alertNotificationSettings,
+    subscriptionCount: pushSubscriptions.length,
+  });
+});
+
+app.put('/api/alerts/settings', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({ success: false, message: 'Apenas administradores' });
+  }
+  
+  const { emailEnabled, emailRecipients, pushEnabled, minSeverityForEmail, minSeverityForPush } = req.body;
+  
+  if (emailEnabled !== undefined) alertNotificationSettings.emailEnabled = emailEnabled;
+  if (emailRecipients !== undefined) alertNotificationSettings.emailRecipients = emailRecipients;
+  if (pushEnabled !== undefined) alertNotificationSettings.pushEnabled = pushEnabled;
+  if (minSeverityForEmail !== undefined) alertNotificationSettings.minSeverityForEmail = minSeverityForEmail;
+  if (minSeverityForPush !== undefined) alertNotificationSettings.minSeverityForPush = minSeverityForPush;
+  
+  res.json({
+    success: true,
+    message: 'Configurações atualizadas',
+    settings: alertNotificationSettings,
+  });
+});
+
+// ============================================
 // Graceful Shutdown
 // ============================================
 const shutdown = (signal) => {
@@ -2083,6 +2392,7 @@ const shutdown = (signal) => {
   saveUsers();
   saveAuditLogs();
   saveAlerts();
+  savePushSubscriptions();
   transporter.close();
   process.exit(0);
 };
@@ -2099,6 +2409,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔐 Autenticação: JWT + API Keys`);
   console.log(`👤 Usuários cadastrados: ${users.length}`);
   console.log(`🔑 API Keys configuradas: ${apiKeys.length}`);
+  console.log(`🔔 Push subscriptions: ${pushSubscriptions.length}`);
   console.log(`📊 Métricas Prometheus: http://localhost:${PORT}/metrics`);
   console.log(`💚 Health check: http://localhost:${PORT}/api/health/detailed`);
 });
