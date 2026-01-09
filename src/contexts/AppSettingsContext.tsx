@@ -1,6 +1,30 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import type { AppSettings, DatabaseConfig, SmtpConfig, AppPreferences } from '@/types';
 
+interface DatabaseTestResult {
+  success: boolean;
+  message: string;
+  databaseExists?: boolean;
+  permissions?: {
+    canCreateDb: boolean;
+    isSuperuser: boolean;
+    username?: string;
+  };
+  warning?: string;
+}
+
+interface DatabaseInitResult {
+  success: boolean;
+  message: string;
+  tables?: string[];
+  schemaVersion?: string;
+  backup?: {
+    fileName?: string;
+    size?: number;
+    error?: string;
+  };
+}
+
 interface AppSettingsContextType {
   settings: AppSettings;
   isLoading: boolean;
@@ -10,9 +34,9 @@ interface AppSettingsContextType {
   updateSmtpConfig: (config: SmtpConfig) => Promise<boolean>;
   updatePreferences: (prefs: AppPreferences) => Promise<boolean>;
   completeSetup: () => Promise<void>;
-  testDatabaseConnection: (config: DatabaseConfig) => Promise<{ success: boolean; message: string; databaseExists?: boolean }>;
+  testDatabaseConnection: (config: DatabaseConfig) => Promise<DatabaseTestResult>;
   testSmtpConnection: (config: SmtpConfig) => Promise<{ success: boolean; message: string }>;
-  initializeDatabase: (config: DatabaseConfig) => Promise<{ success: boolean; message: string; tables?: string[] }>;
+  initializeDatabase: (config: DatabaseConfig) => Promise<DatabaseInitResult>;
   refreshSettings: () => Promise<void>;
 }
 
@@ -154,7 +178,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
     setSettings(newSettings);
   };
 
-  const testDatabaseConnection = async (config: DatabaseConfig): Promise<{ success: boolean; message: string; databaseExists?: boolean }> => {
+  const testDatabaseConnection = async (config: DatabaseConfig): Promise<DatabaseTestResult> => {
     try {
       const response = await fetch(`${backendUrl}/api/setup/test-database`, {
         method: 'POST',
@@ -167,6 +191,8 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
         success: data.success,
         message: data.message,
         databaseExists: data.databaseExists,
+        permissions: data.permissions,
+        warning: data.warning,
       };
     } catch (error) {
       return { 
@@ -197,7 +223,7 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const initializeDatabase = async (config: DatabaseConfig): Promise<{ success: boolean; message: string; tables?: string[] }> => {
+  const initializeDatabase = async (config: DatabaseConfig): Promise<DatabaseInitResult> => {
     try {
       const response = await fetch(`${backendUrl}/api/setup/initialize-database`, {
         method: 'POST',
@@ -210,6 +236,8 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
         success: data.success,
         message: data.message,
         tables: data.tables,
+        schemaVersion: data.schemaVersion,
+        backup: data.backup,
       };
     } catch (error) {
       return { 

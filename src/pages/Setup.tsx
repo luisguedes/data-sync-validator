@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { toast } from 'sonner';
+import { Checkbox } from '@/components/ui/checkbox';
 import { 
   Database, 
   Mail, 
@@ -20,7 +21,10 @@ import {
   AlertCircle,
   Server,
   Check,
-  X
+  X,
+  Download,
+  ShieldAlert,
+  HardDrive
 } from 'lucide-react';
 import type { DatabaseConfig, SmtpConfig, AppPreferences } from '@/types';
 
@@ -37,6 +41,18 @@ interface TestResult {
   message: string;
   databaseExists?: boolean;
   tables?: string[];
+  permissions?: {
+    canCreateDb: boolean;
+    isSuperuser: boolean;
+    username?: string;
+  };
+  warning?: string;
+  schemaVersion?: string;
+  backup?: {
+    fileName?: string;
+    size?: number;
+    error?: string;
+  };
 }
 
 export default function Setup() {
@@ -58,8 +74,10 @@ export default function Setup() {
   const [isLoading, setIsLoading] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
+  const [isBackingUp, setIsBackingUp] = useState(false);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
   const [initResult, setInitResult] = useState<TestResult | null>(null);
+  const [createBackupBeforeInit, setCreateBackupBeforeInit] = useState(true);
 
   const [backendUrlInput, setBackendUrlInput] = useState(backendUrl);
 
@@ -142,16 +160,43 @@ export default function Setup() {
     setIsInitializing(true);
     setInitResult(null);
     
-    const result = await initializeDatabase(dbConfig);
+    const result = await initializeDatabase({ ...dbConfig, createBackup: createBackupBeforeInit });
     setInitResult(result);
     
     if (result.success) {
       toast.success(result.message);
+      if (result.backup?.fileName) {
+        toast.info(`Backup criado: ${result.backup.fileName}`);
+      }
     } else {
       toast.error(result.message);
     }
     
     setIsInitializing(false);
+  };
+
+  const handleCreateBackup = async () => {
+    setIsBackingUp(true);
+    
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/create-backup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dbConfig),
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        toast.success(`Backup criado: ${data.fileName}`);
+      } else {
+        toast.error(data.message || 'Erro ao criar backup');
+      }
+    } catch (error) {
+      toast.error('Erro ao criar backup');
+    }
+    
+    setIsBackingUp(false);
   };
 
   const handleTestSmtp = async () => {
@@ -350,6 +395,26 @@ export default function Setup() {
               </div>
             </div>
 
+            {/* Backup option */}
+            {testResult?.success && testResult?.databaseExists && (
+              <div className="flex items-center space-x-2 p-3 bg-muted rounded-lg">
+                <Checkbox
+                  id="create-backup"
+                  checked={createBackupBeforeInit}
+                  onCheckedChange={(checked) => setCreateBackupBeforeInit(checked === true)}
+                />
+                <div className="flex-1">
+                  <Label htmlFor="create-backup" className="text-sm font-medium cursor-pointer flex items-center gap-2">
+                    <HardDrive className="h-4 w-4" />
+                    Criar backup antes de inicializar
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    Recomendado para proteger dados existentes
+                  </p>
+                </div>
+              </div>
+            )}
+
             <div className="flex gap-2 flex-wrap">
               <Button type="button" variant="outline" onClick={handleTestDatabase} disabled={isTesting || isInitializing}>
                 {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -363,7 +428,47 @@ export default function Setup() {
                 {isInitializing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 2. Criar Banco e Tabelas
               </Button>
+              {testResult?.success && testResult?.databaseExists && (
+                <Button 
+                  type="button" 
+                  variant="outline"
+                  onClick={handleCreateBackup} 
+                  disabled={isBackingUp || isInitializing}
+                >
+                  {isBackingUp && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  <Download className="mr-2 h-4 w-4" />
+                  Backup Manual
+                </Button>
+              )}
             </div>
+
+            {/* Permission warning */}
+            {testResult?.warning && (
+              <Alert variant="destructive">
+                <ShieldAlert className="h-4 w-4" />
+                <AlertDescription className="whitespace-pre-line">
+                  {testResult.warning}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Permission info */}
+            {testResult?.success && testResult?.permissions && (
+              <div className="p-3 bg-muted rounded-lg text-sm">
+                <div className="font-medium mb-1 flex items-center gap-2">
+                  <ShieldAlert className="h-4 w-4" />
+                  Permissões do usuário "{testResult.permissions.username || dbConfig.username}"
+                </div>
+                <div className="flex gap-4 text-xs">
+                  <span className={testResult.permissions.canCreateDb ? "text-green-600" : "text-orange-600"}>
+                    {testResult.permissions.canCreateDb ? "✓" : "✗"} Criar banco de dados
+                  </span>
+                  <span className={testResult.permissions.isSuperuser ? "text-green-600" : "text-muted-foreground"}>
+                    {testResult.permissions.isSuperuser ? "✓ Superusuário" : "Usuário comum"}
+                  </span>
+                </div>
+              </div>
+            )}
 
             {testResult && (
               <Alert variant={testResult.success ? "default" : "destructive"}>
@@ -392,6 +497,30 @@ export default function Setup() {
                 )}
                 <AlertDescription>
                   {initResult.message}
+                  
+                  {initResult.schemaVersion && (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Versão do schema: {initResult.schemaVersion}
+                    </div>
+                  )}
+                  
+                  {initResult.backup?.fileName && (
+                    <div className="mt-2 p-2 bg-secondary/50 rounded text-xs">
+                      <span className="font-medium">📦 Backup criado:</span> {initResult.backup.fileName}
+                      {initResult.backup.size && (
+                        <span className="ml-2 text-muted-foreground">
+                          ({(initResult.backup.size / 1024).toFixed(1)} KB)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  
+                  {initResult.backup?.error && (
+                    <div className="mt-2 text-xs text-orange-600">
+                      ⚠️ Aviso de backup: {initResult.backup.error}
+                    </div>
+                  )}
+                  
                   {initResult.tables && initResult.tables.length > 0 && (
                     <div className="mt-2">
                       <span className="font-medium">Tabelas criadas:</span>

@@ -2600,7 +2600,280 @@ app.get('/api/setup/status', (req, res) => {
   });
 });
 
-// Test database connection
+// ============================================
+// Database Backup & Migration Utilities
+// ============================================
+const BACKUPS_DIR = process.env.BACKUPS_DIR || './backups';
+const SCHEMA_VERSION = '1.0.1'; // Increment this when schema changes
+
+// Ensure backups directory exists
+if (!fs.existsSync(BACKUPS_DIR)) {
+  fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  console.log(`📁 Created backups directory: ${BACKUPS_DIR}`);
+}
+
+// Generate SQL backup of database
+const createDatabaseBackup = async (host, port, database, username, password) => {
+  const client = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database,
+    connectionTimeoutMillis: 30000,
+  });
+  
+  try {
+    await client.connect();
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const backupFileName = `backup_${database}_${timestamp}.sql`;
+    const backupPath = path.join(BACKUPS_DIR, backupFileName);
+    
+    let sqlContent = `-- Database Backup: ${database}\n`;
+    sqlContent += `-- Generated at: ${new Date().toISOString()}\n`;
+    sqlContent += `-- Schema Version: ${SCHEMA_VERSION}\n\n`;
+    
+    // Get all tables
+    const tablesResult = await client.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_type = 'BASE TABLE'
+      ORDER BY table_name
+    `);
+    
+    // Export schema for each table
+    for (const row of tablesResult.rows) {
+      const tableName = row.table_name;
+      
+      // Get column definitions
+      const columnsResult = await client.query(`
+        SELECT column_name, data_type, character_maximum_length, 
+               column_default, is_nullable
+        FROM information_schema.columns 
+        WHERE table_schema = 'public' AND table_name = $1
+        ORDER BY ordinal_position
+      `, [tableName]);
+      
+      sqlContent += `\n-- Table: ${tableName}\n`;
+      
+      // Get primary key
+      const pkResult = await client.query(`
+        SELECT kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu 
+          ON tc.constraint_name = kcu.constraint_name
+        WHERE tc.table_name = $1 AND tc.constraint_type = 'PRIMARY KEY'
+      `, [tableName]);
+      
+      const pkColumn = pkResult.rows[0]?.column_name;
+      
+      // Build CREATE TABLE statement
+      const columnDefs = columnsResult.rows.map(col => {
+        let def = `  ${col.column_name} ${col.data_type.toUpperCase()}`;
+        if (col.character_maximum_length) {
+          def += `(${col.character_maximum_length})`;
+        }
+        if (col.column_default) {
+          def += ` DEFAULT ${col.column_default}`;
+        }
+        if (col.is_nullable === 'NO') {
+          def += ' NOT NULL';
+        }
+        if (col.column_name === pkColumn) {
+          def += ' PRIMARY KEY';
+        }
+        return def;
+      });
+      
+      sqlContent += `CREATE TABLE IF NOT EXISTS ${tableName} (\n`;
+      sqlContent += columnDefs.join(',\n');
+      sqlContent += `\n);\n`;
+      
+      // Export data
+      const dataResult = await client.query(`SELECT * FROM ${tableName}`);
+      
+      if (dataResult.rows.length > 0) {
+        const columns = Object.keys(dataResult.rows[0]).join(', ');
+        
+        for (const dataRow of dataResult.rows) {
+          const values = Object.values(dataRow).map(val => {
+            if (val === null) return 'NULL';
+            if (typeof val === 'object') return `'${JSON.stringify(val).replace(/'/g, "''")}'`;
+            if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
+            if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
+            return val;
+          }).join(', ');
+          
+          sqlContent += `INSERT INTO ${tableName} (${columns}) VALUES (${values}) ON CONFLICT DO NOTHING;\n`;
+        }
+      }
+    }
+    
+    // Export indexes
+    const indexesResult = await client.query(`
+      SELECT indexname, indexdef 
+      FROM pg_indexes 
+      WHERE schemaname = 'public'
+      AND indexname NOT LIKE '%_pkey'
+    `);
+    
+    if (indexesResult.rows.length > 0) {
+      sqlContent += `\n-- Indexes\n`;
+      for (const idx of indexesResult.rows) {
+        sqlContent += `${idx.indexdef};\n`;
+      }
+    }
+    
+    // Write backup file
+    fs.writeFileSync(backupPath, sqlContent, 'utf8');
+    
+    await client.end();
+    
+    return {
+      success: true,
+      backupPath,
+      fileName: backupFileName,
+      size: fs.statSync(backupPath).size,
+      tablesCount: tablesResult.rows.length,
+    };
+    
+  } catch (error) {
+    try { await client.end(); } catch {}
+    throw error;
+  }
+};
+
+// Get current schema version from database
+const getSchemaVersion = async (client) => {
+  try {
+    const result = await client.query(
+      "SELECT value FROM app_settings WHERE key = 'schema_version'"
+    );
+    return result.rows[0]?.value?.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+};
+
+// Update schema version in database
+const setSchemaVersion = async (client, version) => {
+  await client.query(`
+    INSERT INTO app_settings (key, value, updated_at) 
+    VALUES ('schema_version', $1, NOW())
+    ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()
+  `, [JSON.stringify({ version, updatedAt: new Date().toISOString() })]);
+};
+
+// Schema migrations registry
+const MIGRATIONS = {
+  '1.0.0': {
+    description: 'Initial schema',
+    up: async (client) => {
+      // Base schema - no migration needed, created in initialize-database
+    }
+  },
+  '1.0.1': {
+    description: 'Add reminder settings and notification preferences',
+    up: async (client) => {
+      await client.query(`
+        ALTER TABLE conferences 
+        ADD COLUMN IF NOT EXISTS reminder_sent BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMP WITH TIME ZONE;
+        
+        ALTER TABLE app_users
+        ADD COLUMN IF NOT EXISTS notification_preferences JSONB DEFAULT '{}';
+        
+        CREATE INDEX IF NOT EXISTS idx_conferences_reminder ON conferences(reminder_sent, link_expires_at);
+      `);
+    }
+  },
+};
+
+// Compare semver versions
+const compareVersions = (v1, v2) => {
+  const parts1 = v1.split('.').map(Number);
+  const parts2 = v2.split('.').map(Number);
+  
+  for (let i = 0; i < 3; i++) {
+    if (parts1[i] > parts2[i]) return 1;
+    if (parts1[i] < parts2[i]) return -1;
+  }
+  return 0;
+};
+
+// Run pending migrations
+const runMigrations = async (client, currentVersion) => {
+  const migrations = Object.entries(MIGRATIONS)
+    .filter(([version]) => compareVersions(version, currentVersion) > 0)
+    .sort((a, b) => compareVersions(a[0], b[0]));
+  
+  const applied = [];
+  
+  for (const [version, migration] of migrations) {
+    console.log(`⬆️ Running migration ${version}: ${migration.description}`);
+    await migration.up(client);
+    await setSchemaVersion(client, version);
+    applied.push({ version, description: migration.description });
+  }
+  
+  return applied;
+};
+
+// Check user permissions
+const checkUserPermissions = async (host, port, username, password) => {
+  const client = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database: 'postgres',
+    connectionTimeoutMillis: 10000,
+  });
+  
+  try {
+    await client.connect();
+    
+    // Check if user can create databases
+    const createDbResult = await client.query(`
+      SELECT rolcreatedb FROM pg_roles WHERE rolname = current_user
+    `);
+    
+    const canCreateDb = createDbResult.rows[0]?.rolcreatedb || false;
+    
+    // Check if user is superuser
+    const superuserResult = await client.query(`
+      SELECT rolsuper FROM pg_roles WHERE rolname = current_user
+    `);
+    
+    const isSuperuser = superuserResult.rows[0]?.rolsuper || false;
+    
+    // Get user name
+    const userResult = await client.query('SELECT current_user as username');
+    const actualUsername = userResult.rows[0].username;
+    
+    await client.end();
+    
+    return {
+      success: true,
+      username: actualUsername,
+      canCreateDb,
+      isSuperuser,
+      permissions: {
+        createDatabase: canCreateDb || isSuperuser,
+        createTables: true, // If connected, can create tables in own DBs
+        manageFunctions: true,
+      }
+    };
+    
+  } catch (error) {
+    try { await client.end(); } catch {}
+    throw error;
+  }
+};
+
+// Test database connection with permission check
 app.post('/api/setup/test-database', async (req, res) => {
   const { host, port, database, username, password } = req.body;
   
@@ -2630,9 +2903,25 @@ app.post('/api/setup/test-database', async (req, res) => {
       [database]
     );
     
+    const databaseExists = dbCheckResult.rows.length > 0;
+    
+    // Check user permissions
+    let permissions;
+    try {
+      permissions = await checkUserPermissions(host, port, username, password);
+    } catch (permError) {
+      permissions = { canCreateDb: false, isSuperuser: false };
+    }
+    
     await testClient.end();
     
-    const databaseExists = dbCheckResult.rows.length > 0;
+    // Warn if database doesn't exist and user can't create it
+    let warning = null;
+    if (!databaseExists && !permissions.canCreateDb && !permissions.isSuperuser) {
+      warning = `⚠️ ATENÇÃO: O banco "${database}" não existe e o usuário "${username}" não tem permissão CREATEDB. ` +
+        `Para criar o banco, o usuário precisa ter o privilégio CREATEDB. ` +
+        `Execute como superuser: ALTER USER ${username} CREATEDB;`;
+    }
     
     res.json({
       success: true,
@@ -2641,6 +2930,12 @@ app.post('/api/setup/test-database', async (req, res) => {
         : `Conexão OK! Banco "${database}" não existe e será criado.`,
       databaseExists,
       serverVersion: 'PostgreSQL',
+      permissions: {
+        canCreateDb: permissions.canCreateDb || permissions.isSuperuser,
+        isSuperuser: permissions.isSuperuser,
+        username: permissions.username,
+      },
+      warning,
     });
   } catch (error) {
     try { await testClient.end(); } catch {}
@@ -2667,14 +2962,262 @@ app.post('/api/setup/test-database', async (req, res) => {
   }
 });
 
-// Create database and import schema
-app.post('/api/setup/initialize-database', async (req, res) => {
+// Check permissions endpoint
+app.post('/api/setup/check-permissions', async (req, res) => {
+  const { host, port, username, password } = req.body;
+  
+  if (!host || !port || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Host, porta e usuário são obrigatórios',
+    });
+  }
+  
+  try {
+    const permissions = await checkUserPermissions(host, port, username, password);
+    
+    res.json({
+      success: true,
+      ...permissions,
+      recommendations: !permissions.canCreateDb && !permissions.isSuperuser ? [
+        `O usuário "${username}" não pode criar bancos de dados.`,
+        `Para conceder esta permissão, execute como superuser:`,
+        `ALTER USER ${username} CREATEDB;`,
+        `Ou crie o banco manualmente antes de continuar.`,
+      ] : [],
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Erro ao verificar permissões',
+    });
+  }
+});
+
+// Create backup endpoint
+app.post('/api/setup/create-backup', async (req, res) => {
   const { host, port, database, username, password } = req.body;
   
   if (!host || !port || !database || !username) {
     return res.status(400).json({
       success: false,
       message: 'Todos os campos são obrigatórios',
+    });
+  }
+  
+  try {
+    console.log(`💾 Creating backup for database "${database}"...`);
+    const result = await createDatabaseBackup(host, port, database, username, password);
+    
+    console.log(`✅ Backup created: ${result.fileName} (${result.size} bytes)`);
+    
+    res.json({
+      success: true,
+      message: `Backup criado com sucesso!`,
+      ...result,
+    });
+  } catch (error) {
+    console.error('❌ Backup error:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Erro ao criar backup',
+    });
+  }
+});
+
+// List backups endpoint
+app.get('/api/setup/backups', (req, res) => {
+  try {
+    if (!fs.existsSync(BACKUPS_DIR)) {
+      return res.json({ success: true, backups: [] });
+    }
+    
+    const files = fs.readdirSync(BACKUPS_DIR)
+      .filter(f => f.endsWith('.sql'))
+      .map(f => {
+        const filePath = path.join(BACKUPS_DIR, f);
+        const stats = fs.statSync(filePath);
+        return {
+          fileName: f,
+          size: stats.size,
+          createdAt: stats.mtime.toISOString(),
+        };
+      })
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    
+    res.json({
+      success: true,
+      backups: files,
+      backupsDir: BACKUPS_DIR,
+    });
+  } catch (error) {
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
+});
+
+// Download backup endpoint
+app.get('/api/setup/backups/:fileName', (req, res) => {
+  const { fileName } = req.params;
+  const filePath = path.join(BACKUPS_DIR, fileName);
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({
+      success: false,
+      message: 'Backup não encontrado',
+    });
+  }
+  
+  res.download(filePath);
+});
+
+// Check schema version and pending migrations
+app.post('/api/setup/check-migrations', async (req, res) => {
+  const { host, port, database, username, password } = req.body;
+  
+  if (!host || !port || !database || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Todos os campos são obrigatórios',
+    });
+  }
+  
+  const client = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database,
+    connectionTimeoutMillis: 10000,
+  });
+  
+  try {
+    await client.connect();
+    
+    const currentVersion = await getSchemaVersion(client);
+    
+    // Get pending migrations
+    const pendingMigrations = Object.entries(MIGRATIONS)
+      .filter(([version]) => compareVersions(version, currentVersion) > 0)
+      .map(([version, migration]) => ({
+        version,
+        description: migration.description,
+      }))
+      .sort((a, b) => compareVersions(a.version, b.version));
+    
+    await client.end();
+    
+    res.json({
+      success: true,
+      currentVersion,
+      latestVersion: SCHEMA_VERSION,
+      needsMigration: pendingMigrations.length > 0,
+      pendingMigrations,
+    });
+  } catch (error) {
+    try { await client.end(); } catch {}
+    
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Erro ao verificar migrações',
+    });
+  }
+});
+
+// Run migrations with automatic backup
+app.post('/api/setup/run-migrations', async (req, res) => {
+  const { host, port, database, username, password, createBackup = true } = req.body;
+  
+  if (!host || !port || !database || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Todos os campos são obrigatórios',
+    });
+  }
+  
+  let backupInfo = null;
+  
+  // Create backup before migrations if requested
+  if (createBackup) {
+    try {
+      console.log(`💾 Creating pre-migration backup...`);
+      backupInfo = await createDatabaseBackup(host, port, database, username, password);
+      console.log(`✅ Pre-migration backup created: ${backupInfo.fileName}`);
+    } catch (backupError) {
+      console.warn('⚠️ Backup failed, but continuing with migrations:', backupError.message);
+      backupInfo = { error: backupError.message };
+    }
+  }
+  
+  const client = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database,
+    connectionTimeoutMillis: 30000,
+  });
+  
+  try {
+    await client.connect();
+    
+    const currentVersion = await getSchemaVersion(client);
+    console.log(`📊 Current schema version: ${currentVersion}`);
+    
+    const appliedMigrations = await runMigrations(client, currentVersion);
+    
+    const newVersion = await getSchemaVersion(client);
+    
+    await client.end();
+    
+    res.json({
+      success: true,
+      message: appliedMigrations.length > 0 
+        ? `${appliedMigrations.length} migração(ões) aplicada(s) com sucesso!`
+        : 'Schema já está atualizado.',
+      previousVersion: currentVersion,
+      currentVersion: newVersion,
+      appliedMigrations,
+      backup: backupInfo,
+    });
+  } catch (error) {
+    try { await client.end(); } catch {}
+    
+    console.error('❌ Migration error:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: error.message || 'Erro ao executar migrações',
+      backup: backupInfo,
+      hint: backupInfo?.fileName 
+        ? `Um backup foi criado antes da falha: ${backupInfo.fileName}`
+        : null,
+    });
+  }
+});
+
+// Create database and import schema
+app.post('/api/setup/initialize-database', async (req, res) => {
+  const { host, port, database, username, password, createBackup = true } = req.body;
+  
+  if (!host || !port || !database || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Todos os campos são obrigatórios',
+    });
+  }
+  
+  // Check permissions first
+  let permissions;
+  try {
+    permissions = await checkUserPermissions(host, port, username, password);
+  } catch (permError) {
+    return res.status(400).json({
+      success: false,
+      message: `Erro ao verificar permissões: ${permError.message}`,
     });
   }
   
@@ -2696,8 +3239,34 @@ app.post('/api/setup/initialize-database', async (req, res) => {
       [database]
     );
     
+    const databaseExists = dbCheckResult.rows.length > 0;
+    let backupInfo = null;
+    
+    // Create backup if database exists and backup requested
+    if (databaseExists && createBackup) {
+      try {
+        console.log(`💾 Creating backup before schema changes...`);
+        backupInfo = await createDatabaseBackup(host, port, database, username, password);
+        console.log(`✅ Backup created: ${backupInfo.fileName}`);
+      } catch (backupError) {
+        console.warn('⚠️ Backup failed:', backupError.message);
+        backupInfo = { error: backupError.message };
+      }
+    }
+    
     // Create database if it doesn't exist
-    if (dbCheckResult.rows.length === 0) {
+    if (!databaseExists) {
+      // Check if user can create database
+      if (!permissions.canCreateDb && !permissions.isSuperuser) {
+        await adminClient.end();
+        return res.status(403).json({
+          success: false,
+          message: `O usuário "${username}" não tem permissão para criar bancos de dados.`,
+          permissions,
+          recommendation: `Execute como superuser: ALTER USER ${username} CREATEDB;`,
+        });
+      }
+      
       console.log(`📦 Creating database "${database}"...`);
       await adminClient.query(`CREATE DATABASE "${database}"`);
       console.log(`✅ Database "${database}" created`);
@@ -2717,161 +3286,179 @@ app.post('/api/setup/initialize-database', async (req, res) => {
     
     await appClient.connect();
     
-    // Create the application schema
-    const schema = `
-      -- Enable UUID extension
-      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-      
-      -- Users table (for app authentication)
-      CREATE TABLE IF NOT EXISTS app_users (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        email VARCHAR(255) UNIQUE NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        password_hash VARCHAR(255) NOT NULL,
-        password_salt VARCHAR(255) NOT NULL,
-        role VARCHAR(50) NOT NULL DEFAULT 'viewer',
-        active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        created_by VARCHAR(255)
-      );
-      
-      -- Database connections (client databases to validate)
-      CREATE TABLE IF NOT EXISTS db_connections (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        name VARCHAR(255) NOT NULL,
-        host VARCHAR(255) NOT NULL,
-        port INTEGER NOT NULL DEFAULT 5432,
-        database_name VARCHAR(255) NOT NULL,
-        username VARCHAR(255) NOT NULL,
-        password_encrypted TEXT,
-        status VARCHAR(50) DEFAULT 'active',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        created_by VARCHAR(255)
-      );
-      
-      -- Conference templates
-      CREATE TABLE IF NOT EXISTS templates (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        name VARCHAR(255) NOT NULL,
-        description TEXT,
-        version VARCHAR(50) DEFAULT '1.0.0',
-        expected_inputs JSONB DEFAULT '[]',
-        sections JSONB DEFAULT '[]',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        created_by VARCHAR(255)
-      );
-      
-      -- Conferences
-      CREATE TABLE IF NOT EXISTS conferences (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        name VARCHAR(255) NOT NULL,
-        client_name VARCHAR(255) NOT NULL,
-        client_email VARCHAR(255) NOT NULL,
-        connection_id UUID REFERENCES db_connections(id),
-        template_id UUID REFERENCES templates(id),
-        status VARCHAR(50) DEFAULT 'pending',
-        link_token VARCHAR(255) UNIQUE NOT NULL,
-        link_expires_at TIMESTAMP WITH TIME ZONE,
-        stores JSONB DEFAULT '[]',
-        expected_input_values JSONB DEFAULT '{}',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        created_by VARCHAR(255),
-        completed_at TIMESTAMP WITH TIME ZONE,
-        completed_by VARCHAR(255)
-      );
-      
-      -- Conference items (checklist items for each conference)
-      CREATE TABLE IF NOT EXISTS conference_items (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
-        template_item_id UUID,
-        status VARCHAR(50) DEFAULT 'pending',
-        query_result JSONB,
-        user_response VARCHAR(50),
-        observation TEXT,
-        attachments JSONB DEFAULT '[]',
-        executed_at TIMESTAMP WITH TIME ZONE,
-        responded_at TIMESTAMP WITH TIME ZONE,
-        responded_by VARCHAR(255)
-      );
-      
-      -- Email history
-      CREATE TABLE IF NOT EXISTS email_history (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
-        type VARCHAR(50) NOT NULL,
-        recipient VARCHAR(255) NOT NULL,
-        subject VARCHAR(500),
-        status VARCHAR(50) DEFAULT 'pending',
-        sent_at TIMESTAMP WITH TIME ZONE,
-        error TEXT
-      );
-      
-      -- Audit logs
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        action VARCHAR(100) NOT NULL,
-        user_id UUID,
-        user_email VARCHAR(255),
-        user_name VARCHAR(255),
-        ip_address VARCHAR(50),
-        user_agent TEXT,
-        details JSONB DEFAULT '{}',
-        success BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-      
-      -- API Keys
-      CREATE TABLE IF NOT EXISTS api_keys (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        name VARCHAR(255) NOT NULL,
-        key_hash VARCHAR(255) NOT NULL,
-        permission VARCHAR(50) DEFAULT 'readonly',
-        active BOOLEAN DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-        created_by VARCHAR(255),
-        last_used_at TIMESTAMP WITH TIME ZONE,
-        usage_count INTEGER DEFAULT 0
-      );
-      
-      -- Security alerts
-      CREATE TABLE IF NOT EXISTS security_alerts (
-        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-        type VARCHAR(100) NOT NULL,
-        severity VARCHAR(50) NOT NULL,
-        title VARCHAR(500) NOT NULL,
-        description TEXT,
-        details JSONB DEFAULT '{}',
-        acknowledged BOOLEAN DEFAULT false,
-        acknowledged_at TIMESTAMP WITH TIME ZONE,
-        acknowledged_by VARCHAR(255),
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-      
-      -- App settings
-      CREATE TABLE IF NOT EXISTS app_settings (
-        key VARCHAR(100) PRIMARY KEY,
-        value JSONB NOT NULL,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-      );
-      
-      -- Create indexes for better performance
-      CREATE INDEX IF NOT EXISTS idx_conferences_status ON conferences(status);
-      CREATE INDEX IF NOT EXISTS idx_conferences_link_token ON conferences(link_token);
-      CREATE INDEX IF NOT EXISTS idx_conference_items_conference_id ON conference_items(conference_id);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_audit_logs_user_email ON audit_logs(user_email);
-      CREATE INDEX IF NOT EXISTS idx_security_alerts_created_at ON security_alerts(created_at DESC);
-      CREATE INDEX IF NOT EXISTS idx_email_history_conference_id ON email_history(conference_id);
-    `;
+    // Check current schema version
+    const currentVersion = await getSchemaVersion(appClient);
+    console.log(`📊 Current schema version: ${currentVersion}`);
     
-    console.log('🔧 Creating schema...');
-    await appClient.query(schema);
-    console.log('✅ Schema created successfully');
+    // Create the application schema (only if new database)
+    if (currentVersion === '0.0.0') {
+      const schema = `
+        -- Enable UUID extension
+        CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+        
+        -- Users table (for app authentication)
+        CREATE TABLE IF NOT EXISTS app_users (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          email VARCHAR(255) UNIQUE NOT NULL,
+          name VARCHAR(255) NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          password_salt VARCHAR(255) NOT NULL,
+          role VARCHAR(50) NOT NULL DEFAULT 'viewer',
+          active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          created_by VARCHAR(255),
+          notification_preferences JSONB DEFAULT '{}'
+        );
+        
+        -- Database connections (client databases to validate)
+        CREATE TABLE IF NOT EXISTS db_connections (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name VARCHAR(255) NOT NULL,
+          host VARCHAR(255) NOT NULL,
+          port INTEGER NOT NULL DEFAULT 5432,
+          database_name VARCHAR(255) NOT NULL,
+          username VARCHAR(255) NOT NULL,
+          password_encrypted TEXT,
+          status VARCHAR(50) DEFAULT 'active',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          created_by VARCHAR(255)
+        );
+        
+        -- Conference templates
+        CREATE TABLE IF NOT EXISTS templates (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name VARCHAR(255) NOT NULL,
+          description TEXT,
+          version VARCHAR(50) DEFAULT '1.0.0',
+          expected_inputs JSONB DEFAULT '[]',
+          sections JSONB DEFAULT '[]',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          created_by VARCHAR(255)
+        );
+        
+        -- Conferences
+        CREATE TABLE IF NOT EXISTS conferences (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name VARCHAR(255) NOT NULL,
+          client_name VARCHAR(255) NOT NULL,
+          client_email VARCHAR(255) NOT NULL,
+          connection_id UUID REFERENCES db_connections(id),
+          template_id UUID REFERENCES templates(id),
+          status VARCHAR(50) DEFAULT 'pending',
+          link_token VARCHAR(255) UNIQUE NOT NULL,
+          link_expires_at TIMESTAMP WITH TIME ZONE,
+          stores JSONB DEFAULT '[]',
+          expected_input_values JSONB DEFAULT '{}',
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          created_by VARCHAR(255),
+          completed_at TIMESTAMP WITH TIME ZONE,
+          completed_by VARCHAR(255),
+          reminder_sent BOOLEAN DEFAULT false,
+          reminder_sent_at TIMESTAMP WITH TIME ZONE
+        );
+        
+        -- Conference items (checklist items for each conference)
+        CREATE TABLE IF NOT EXISTS conference_items (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
+          template_item_id UUID,
+          status VARCHAR(50) DEFAULT 'pending',
+          query_result JSONB,
+          user_response VARCHAR(50),
+          observation TEXT,
+          attachments JSONB DEFAULT '[]',
+          executed_at TIMESTAMP WITH TIME ZONE,
+          responded_at TIMESTAMP WITH TIME ZONE,
+          responded_by VARCHAR(255)
+        );
+        
+        -- Email history
+        CREATE TABLE IF NOT EXISTS email_history (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
+          type VARCHAR(50) NOT NULL,
+          recipient VARCHAR(255) NOT NULL,
+          subject VARCHAR(500),
+          status VARCHAR(50) DEFAULT 'pending',
+          sent_at TIMESTAMP WITH TIME ZONE,
+          error TEXT
+        );
+        
+        -- Audit logs
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          action VARCHAR(100) NOT NULL,
+          user_id UUID,
+          user_email VARCHAR(255),
+          user_name VARCHAR(255),
+          ip_address VARCHAR(50),
+          user_agent TEXT,
+          details JSONB DEFAULT '{}',
+          success BOOLEAN DEFAULT true,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        
+        -- API Keys
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          name VARCHAR(255) NOT NULL,
+          key_hash VARCHAR(255) NOT NULL,
+          permission VARCHAR(50) DEFAULT 'readonly',
+          active BOOLEAN DEFAULT true,
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+          created_by VARCHAR(255),
+          last_used_at TIMESTAMP WITH TIME ZONE,
+          usage_count INTEGER DEFAULT 0
+        );
+        
+        -- Security alerts
+        CREATE TABLE IF NOT EXISTS security_alerts (
+          id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+          type VARCHAR(100) NOT NULL,
+          severity VARCHAR(50) NOT NULL,
+          title VARCHAR(500) NOT NULL,
+          description TEXT,
+          details JSONB DEFAULT '{}',
+          acknowledged BOOLEAN DEFAULT false,
+          acknowledged_at TIMESTAMP WITH TIME ZONE,
+          acknowledged_by VARCHAR(255),
+          created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        
+        -- App settings
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key VARCHAR(100) PRIMARY KEY,
+          value JSONB NOT NULL,
+          updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        
+        -- Create indexes for better performance
+        CREATE INDEX IF NOT EXISTS idx_conferences_status ON conferences(status);
+        CREATE INDEX IF NOT EXISTS idx_conferences_link_token ON conferences(link_token);
+        CREATE INDEX IF NOT EXISTS idx_conferences_reminder ON conferences(reminder_sent, link_expires_at);
+        CREATE INDEX IF NOT EXISTS idx_conference_items_conference_id ON conference_items(conference_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_user_email ON audit_logs(user_email);
+        CREATE INDEX IF NOT EXISTS idx_security_alerts_created_at ON security_alerts(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_email_history_conference_id ON email_history(conference_id);
+      `;
+      
+      console.log('🔧 Creating schema...');
+      await appClient.query(schema);
+      await setSchemaVersion(appClient, SCHEMA_VERSION);
+      console.log('✅ Schema created successfully');
+    } else {
+      // Run pending migrations
+      console.log('🔄 Checking for pending migrations...');
+      const appliedMigrations = await runMigrations(appClient, currentVersion);
+      if (appliedMigrations.length > 0) {
+        console.log(`✅ Applied ${appliedMigrations.length} migration(s)`);
+      }
+    }
     
     // Verify tables were created
     const tablesResult = await appClient.query(`
@@ -2880,6 +3467,8 @@ app.post('/api/setup/initialize-database', async (req, res) => {
       WHERE table_schema = 'public' 
       ORDER BY table_name
     `);
+    
+    const finalVersion = await getSchemaVersion(appClient);
     
     await appClient.end();
     
@@ -2890,6 +3479,8 @@ app.post('/api/setup/initialize-database', async (req, res) => {
       message: `Banco de dados "${database}" configurado com sucesso!`,
       tables,
       tablesCreated: tables.length,
+      schemaVersion: finalVersion,
+      backup: backupInfo,
     });
     
   } catch (error) {
@@ -2898,9 +3489,11 @@ app.post('/api/setup/initialize-database', async (req, res) => {
     console.error('❌ Database initialization error:', error);
     
     let errorMessage = 'Erro ao inicializar o banco de dados';
+    let recommendation = null;
     
     if (error.code === '42501') {
       errorMessage = 'Permissão negada. O usuário não tem privilégios para criar banco de dados.';
+      recommendation = `Execute como superuser: ALTER USER ${username} CREATEDB;`;
     } else if (error.message) {
       errorMessage = error.message;
     }
@@ -2909,6 +3502,7 @@ app.post('/api/setup/initialize-database', async (req, res) => {
       success: false,
       message: errorMessage,
       code: error.code,
+      recommendation,
     });
   }
 });
