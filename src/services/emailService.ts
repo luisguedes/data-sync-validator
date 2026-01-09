@@ -13,14 +13,25 @@ export interface EmailResult {
   messageId?: string;
 }
 
-// URL do backend local - configurável via settings
-const getBackendUrl = (): string => {
+interface BackendSettings {
+  url: string;
+  apiKey?: string;
+}
+
+// Get backend configuration from localStorage
+const getBackendSettings = (): BackendSettings => {
   const settings = localStorage.getItem('app_settings');
   if (settings) {
     const parsed = JSON.parse(settings);
-    return parsed.preferences?.backendUrl || 'http://localhost:3001';
+    return {
+      url: parsed.preferences?.backendUrl || 'http://localhost:3001',
+      apiKey: parsed.preferences?.backendApiKey || '',
+    };
   }
-  return 'http://localhost:3001';
+  return {
+    url: 'http://localhost:3001',
+    apiKey: '',
+  };
 };
 
 /**
@@ -28,16 +39,45 @@ const getBackendUrl = (): string => {
  * O backend deve expor POST /api/send-email
  */
 export async function sendEmail(options: EmailOptions): Promise<EmailResult> {
-  const backendUrl = getBackendUrl();
+  const { url: backendUrl, apiKey } = getBackendSettings();
+  
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  // Add API key if configured
+  if (apiKey) {
+    headers['x-api-key'] = apiKey;
+  }
   
   try {
     const response = await fetch(`${backendUrl}/api/send-email`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(options),
     });
+
+    if (response.status === 401) {
+      return {
+        success: false,
+        message: 'API key não fornecida. Configure a chave nas configurações.',
+      };
+    }
+
+    if (response.status === 403) {
+      return {
+        success: false,
+        message: 'API key inválida. Verifique a chave nas configurações.',
+      };
+    }
+
+    if (response.status === 429) {
+      const error = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        message: `Limite de requisições excedido. Tente novamente em ${error.retryAfter || 60} segundos.`,
+      };
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: 'Erro desconhecido' }));
@@ -60,6 +100,63 @@ export async function sendEmail(options: EmailOptions): Promise<EmailResult> {
       success: true,
       message: 'Email simulado (backend não configurado)',
     };
+  }
+}
+
+/**
+ * Testa a conexão com o backend e SMTP
+ */
+export async function testBackendConnection(): Promise<EmailResult> {
+  const { url: backendUrl, apiKey } = getBackendSettings();
+  
+  const headers: Record<string, string> = {};
+  if (apiKey) {
+    headers['x-api-key'] = apiKey;
+  }
+
+  try {
+    const response = await fetch(`${backendUrl}/api/test-smtp`, {
+      method: 'GET',
+      headers,
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        success: false,
+        message: 'Falha na autenticação. Verifique a API key.',
+      };
+    }
+
+    const result = await response.json();
+    return {
+      success: result.success,
+      message: result.message,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: 'Backend não disponível',
+    };
+  }
+}
+
+/**
+ * Obtém informações de saúde do backend
+ */
+export async function getBackendHealth(): Promise<{
+  status: string;
+  authEnabled: boolean;
+  smtp: string;
+  uptime: number;
+} | null> {
+  const { url: backendUrl } = getBackendSettings();
+
+  try {
+    const response = await fetch(`${backendUrl}/api/health`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
   }
 }
 
