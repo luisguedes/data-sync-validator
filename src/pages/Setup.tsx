@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { toast } from 'sonner';
 import { 
   Database, 
@@ -15,25 +16,52 @@ import {
   CheckCircle2,
   Loader2,
   ChevronRight,
-  ChevronLeft
+  ChevronLeft,
+  AlertCircle,
+  Server,
+  Check,
+  X
 } from 'lucide-react';
 import type { DatabaseConfig, SmtpConfig, AppPreferences } from '@/types';
 
 const steps = [
-  { id: 'database', title: 'Banco de Dados', icon: Database, description: 'Configure a conexão com o PostgreSQL da aplicação' },
+  { id: 'backend', title: 'Backend', icon: Server, description: 'Configure a URL do servidor backend' },
+  { id: 'database', title: 'Banco de Dados', icon: Database, description: 'Configure a conexão com o PostgreSQL' },
   { id: 'smtp', title: 'Email (SMTP)', icon: Mail, description: 'Configure o servidor de envio de emails' },
   { id: 'admin', title: 'Administrador', icon: User, description: 'Crie o primeiro usuário administrador' },
   { id: 'preferences', title: 'Preferências', icon: SettingsIcon, description: 'Defina as configurações gerais' },
 ];
 
+interface TestResult {
+  success: boolean;
+  message: string;
+  databaseExists?: boolean;
+  tables?: string[];
+}
+
 export default function Setup() {
   const navigate = useNavigate();
-  const { updateDatabaseConfig, updateSmtpConfig, updatePreferences, completeSetup, testDatabaseConnection, testSmtpConnection } = useAppSettings();
+  const { 
+    backendUrl, 
+    setBackendUrl, 
+    updateDatabaseConfig, 
+    updateSmtpConfig, 
+    updatePreferences, 
+    completeSetup, 
+    testDatabaseConnection, 
+    testSmtpConnection,
+    initializeDatabase 
+  } = useAppSettings();
   const { register } = useAuth();
   
   const [currentStep, setCurrentStep] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(false);
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
+  const [initResult, setInitResult] = useState<TestResult | null>(null);
+
+  const [backendUrlInput, setBackendUrlInput] = useState(backendUrl);
 
   const [dbConfig, setDbConfig] = useState<DatabaseConfig>({
     host: 'localhost',
@@ -63,57 +91,127 @@ export default function Setup() {
     companyName: '',
     theme: 'system',
     timezone: 'America/Sao_Paulo',
-    backendUrl: 'http://localhost:3001',
+    backendUrl: backendUrl,
     emailNotifications: true,
   });
 
+  const handleTestBackend = async () => {
+    setIsTesting(true);
+    setTestResult(null);
+    
+    try {
+      const response = await fetch(`${backendUrlInput}/api/health`);
+      if (response.ok) {
+        const data = await response.json();
+        setTestResult({ 
+          success: true, 
+          message: `Backend conectado! Versão: ${data.version}, Uptime: ${data.uptime}s` 
+        });
+        setBackendUrl(backendUrlInput);
+      } else {
+        setTestResult({ success: false, message: 'Backend não respondeu corretamente' });
+      }
+    } catch (error) {
+      setTestResult({ 
+        success: false, 
+        message: 'Não foi possível conectar ao backend. Verifique se o servidor está rodando.' 
+      });
+    }
+    
+    setIsTesting(false);
+  };
+
   const handleTestDatabase = async () => {
     setIsTesting(true);
+    setTestResult(null);
+    setInitResult(null);
+    
     const result = await testDatabaseConnection(dbConfig);
+    setTestResult(result);
+    
     if (result.success) {
       toast.success(result.message);
     } else {
       toast.error(result.message);
     }
+    
     setIsTesting(false);
+  };
+
+  const handleInitializeDatabase = async () => {
+    setIsInitializing(true);
+    setInitResult(null);
+    
+    const result = await initializeDatabase(dbConfig);
+    setInitResult(result);
+    
+    if (result.success) {
+      toast.success(result.message);
+    } else {
+      toast.error(result.message);
+    }
+    
+    setIsInitializing(false);
   };
 
   const handleTestSmtp = async () => {
     setIsTesting(true);
+    setTestResult(null);
+    
     const result = await testSmtpConnection(smtpConfig);
+    setTestResult(result);
+    
     if (result.success) {
       toast.success(result.message);
     } else {
       toast.error(result.message);
     }
+    
     setIsTesting(false);
   };
 
   const handleNext = async () => {
     setIsLoading(true);
+    setTestResult(null);
+    setInitResult(null);
 
     try {
       if (currentStep === 0) {
-        await updateDatabaseConfig(dbConfig);
+        // Backend step - just save the URL
+        setBackendUrl(backendUrlInput);
+        setPrefsConfig(prev => ({ ...prev, backendUrl: backendUrlInput }));
       } else if (currentStep === 1) {
-        await updateSmtpConfig(smtpConfig);
+        // Database step - must be initialized
+        if (!initResult?.success) {
+          toast.error('Por favor, inicialize o banco de dados antes de continuar');
+          setIsLoading(false);
+          return;
+        }
+        await updateDatabaseConfig(dbConfig);
       } else if (currentStep === 2) {
+        await updateSmtpConfig(smtpConfig);
+      } else if (currentStep === 3) {
         if (adminConfig.password !== adminConfig.confirmPassword) {
           toast.error('As senhas não coincidem');
           setIsLoading(false);
           return;
         }
+        if (adminConfig.password.length < 6) {
+          toast.error('A senha deve ter pelo menos 6 caracteres');
+          setIsLoading(false);
+          return;
+        }
         await register(adminConfig.email, adminConfig.password, adminConfig.name);
-      } else if (currentStep === 3) {
+      } else if (currentStep === 4) {
         await updatePreferences(prefsConfig);
-        completeSetup();
+        await completeSetup();
         toast.success('Configuração concluída com sucesso!');
         navigate('/dashboard');
         return;
       }
 
       setCurrentStep(currentStep + 1);
-    } catch {
+    } catch (error) {
       toast.error('Erro ao salvar configuração');
     } finally {
       setIsLoading(false);
@@ -121,7 +219,27 @@ export default function Setup() {
   };
 
   const handleBack = () => {
+    setTestResult(null);
+    setInitResult(null);
     setCurrentStep(currentStep - 1);
+  };
+
+  const canProceed = () => {
+    switch (currentStep) {
+      case 0:
+        return backendUrlInput.length > 0;
+      case 1:
+        return initResult?.success === true;
+      case 2:
+        return true; // SMTP is optional
+      case 3:
+        return adminConfig.email && adminConfig.password && adminConfig.name && 
+               adminConfig.password === adminConfig.confirmPassword;
+      case 4:
+        return prefsConfig.companyName.length > 0;
+      default:
+        return true;
+    }
   };
 
   const renderStepContent = () => {
@@ -129,6 +247,56 @@ export default function Setup() {
       case 0:
         return (
           <div className="space-y-4">
+            <Alert>
+              <Server className="h-4 w-4" />
+              <AlertDescription>
+                Configure a URL do servidor backend Node.js. Este servidor é responsável pelo envio de emails e comunicação com o banco de dados.
+              </AlertDescription>
+            </Alert>
+            
+            <div className="space-y-2">
+              <Label htmlFor="backend-url">URL do Backend</Label>
+              <Input
+                id="backend-url"
+                value={backendUrlInput}
+                onChange={(e) => setBackendUrlInput(e.target.value)}
+                placeholder="http://localhost:3001"
+              />
+              <p className="text-xs text-muted-foreground">
+                Exemplo: http://localhost:3001 ou https://api.seudominio.com
+              </p>
+            </div>
+
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" onClick={handleTestBackend} disabled={isTesting}>
+                {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Testar Conexão
+              </Button>
+            </div>
+
+            {testResult && (
+              <Alert variant={testResult.success ? "default" : "destructive"}>
+                {testResult.success ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <AlertCircle className="h-4 w-4" />
+                )}
+                <AlertDescription>{testResult.message}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        );
+
+      case 1:
+        return (
+          <div className="space-y-4">
+            <Alert>
+              <Database className="h-4 w-4" />
+              <AlertDescription>
+                Configure a conexão com o PostgreSQL. O sistema irá criar o banco de dados e as tabelas necessárias automaticamente.
+              </AlertDescription>
+            </Alert>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="db-host">Host</Label>
@@ -157,6 +325,9 @@ export default function Setup() {
                 onChange={(e) => setDbConfig({ ...dbConfig, database: e.target.value })}
                 placeholder="conferencia_app"
               />
+              <p className="text-xs text-muted-foreground">
+                Se o banco não existir, ele será criado automaticamente.
+              </p>
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -178,16 +349,77 @@ export default function Setup() {
                 />
               </div>
             </div>
-            <Button type="button" variant="outline" onClick={handleTestDatabase} disabled={isTesting}>
-              {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Testar Conexão
-            </Button>
+
+            <div className="flex gap-2 flex-wrap">
+              <Button type="button" variant="outline" onClick={handleTestDatabase} disabled={isTesting || isInitializing}>
+                {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                1. Testar Conexão
+              </Button>
+              <Button 
+                type="button" 
+                onClick={handleInitializeDatabase} 
+                disabled={isInitializing || isTesting || !testResult?.success}
+              >
+                {isInitializing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                2. Criar Banco e Tabelas
+              </Button>
+            </div>
+
+            {testResult && (
+              <Alert variant={testResult.success ? "default" : "destructive"}>
+                {testResult.success ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <X className="h-4 w-4" />
+                )}
+                <AlertDescription>
+                  {testResult.message}
+                  {testResult.databaseExists === false && (
+                    <span className="block mt-1 text-sm">
+                      O banco será criado ao clicar em "Criar Banco e Tabelas".
+                    </span>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {initResult && (
+              <Alert variant={initResult.success ? "default" : "destructive"}>
+                {initResult.success ? (
+                  <CheckCircle2 className="h-4 w-4" />
+                ) : (
+                  <AlertCircle className="h-4 w-4" />
+                )}
+                <AlertDescription>
+                  {initResult.message}
+                  {initResult.tables && initResult.tables.length > 0 && (
+                    <div className="mt-2">
+                      <span className="font-medium">Tabelas criadas:</span>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {initResult.tables.map(table => (
+                          <span key={table} className="text-xs bg-secondary px-2 py-0.5 rounded">
+                            {table}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
         );
 
-      case 1:
+      case 2:
         return (
           <div className="space-y-4">
+            <Alert>
+              <Mail className="h-4 w-4" />
+              <AlertDescription>
+                Configure o servidor SMTP para envio de emails (links de conferência, lembretes, etc.). Esta etapa é opcional.
+              </AlertDescription>
+            </Alert>
+
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="smtp-host">Host SMTP</Label>
@@ -248,16 +480,37 @@ export default function Setup() {
                 />
               </div>
             </div>
-            <Button type="button" variant="outline" onClick={handleTestSmtp} disabled={isTesting}>
-              {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Enviar Email de Teste
-            </Button>
+            
+            {smtpConfig.host && (
+              <Button type="button" variant="outline" onClick={handleTestSmtp} disabled={isTesting}>
+                {isTesting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Testar Conexão SMTP
+              </Button>
+            )}
+
+            {testResult && (
+              <Alert variant={testResult.success ? "default" : "destructive"}>
+                {testResult.success ? (
+                  <Check className="h-4 w-4" />
+                ) : (
+                  <AlertCircle className="h-4 w-4" />
+                )}
+                <AlertDescription>{testResult.message}</AlertDescription>
+              </Alert>
+            )}
           </div>
         );
 
-      case 2:
+      case 3:
         return (
           <div className="space-y-4">
+            <Alert>
+              <User className="h-4 w-4" />
+              <AlertDescription>
+                Crie o primeiro usuário administrador do sistema. Este usuário terá acesso total a todas as funcionalidades.
+              </AlertDescription>
+            </Alert>
+
             <div className="space-y-2">
               <Label htmlFor="admin-name">Nome Completo</Label>
               <Input
@@ -286,6 +539,7 @@ export default function Setup() {
                   value={adminConfig.password}
                   onChange={(e) => setAdminConfig({ ...adminConfig, password: e.target.value })}
                 />
+                <p className="text-xs text-muted-foreground">Mínimo 6 caracteres</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="admin-confirm">Confirmar Senha</Label>
@@ -297,10 +551,17 @@ export default function Setup() {
                 />
               </div>
             </div>
+            
+            {adminConfig.password && adminConfig.confirmPassword && adminConfig.password !== adminConfig.confirmPassword && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>As senhas não coincidem</AlertDescription>
+              </Alert>
+            )}
           </div>
         );
 
-      case 3:
+      case 4:
         return (
           <div className="space-y-4">
             <div className="space-y-2">
@@ -343,34 +604,26 @@ export default function Setup() {
             </div>
             
             <div className="pt-4 border-t">
-              <h4 className="font-medium mb-3">Backend Local (Emails)</h4>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="pref-backend">URL do Backend</Label>
-                  <Input
-                    id="pref-backend"
-                    value={prefsConfig.backendUrl || ''}
-                    onChange={(e) => setPrefsConfig({ ...prefsConfig, backendUrl: e.target.value })}
-                    placeholder="http://localhost:3001"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Endpoint do servidor Node.js para envio de emails
-                  </p>
-                </div>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="pref-email-notifications"
-                    checked={prefsConfig.emailNotifications ?? true}
-                    onChange={(e) => setPrefsConfig({ ...prefsConfig, emailNotifications: e.target.checked })}
-                    className="h-4 w-4 rounded border-input"
-                  />
-                  <Label htmlFor="pref-email-notifications" className="text-sm font-normal">
-                    Ativar notificações por email ao criar conferências
-                  </Label>
-                </div>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="pref-email-notifications"
+                  checked={prefsConfig.emailNotifications ?? true}
+                  onChange={(e) => setPrefsConfig({ ...prefsConfig, emailNotifications: e.target.checked })}
+                  className="h-4 w-4 rounded border-input"
+                />
+                <Label htmlFor="pref-email-notifications" className="text-sm font-normal">
+                  Ativar notificações por email ao criar conferências
+                </Label>
               </div>
             </div>
+
+            <Alert>
+              <CheckCircle2 className="h-4 w-4" />
+              <AlertDescription>
+                Ao finalizar, o sistema estará pronto para uso. Você será redirecionado para o painel principal.
+              </AlertDescription>
+            </Alert>
           </div>
         );
 
@@ -388,7 +641,7 @@ export default function Setup() {
         </div>
 
         {/* Steps indicator */}
-        <div className="flex items-center justify-center gap-2">
+        <div className="flex items-center justify-center gap-1 sm:gap-2">
           {steps.map((step, index) => {
             const StepIcon = step.icon;
             const isCompleted = index < currentStep;
@@ -397,7 +650,7 @@ export default function Setup() {
             return (
               <div key={step.id} className="flex items-center">
                 <div
-                  className={`flex items-center justify-center w-10 h-10 rounded-full transition-colors ${
+                  className={`flex items-center justify-center w-8 h-8 sm:w-10 sm:h-10 rounded-full transition-colors ${
                     isCompleted
                       ? 'bg-status-completed text-status-completed-foreground'
                       : isCurrent
@@ -406,14 +659,14 @@ export default function Setup() {
                   }`}
                 >
                   {isCompleted ? (
-                    <CheckCircle2 className="h-5 w-5" />
+                    <CheckCircle2 className="h-4 w-4 sm:h-5 sm:w-5" />
                   ) : (
-                    <StepIcon className="h-5 w-5" />
+                    <StepIcon className="h-4 w-4 sm:h-5 sm:w-5" />
                   )}
                 </div>
                 {index < steps.length - 1 && (
                   <div
-                    className={`w-12 h-1 mx-1 rounded ${
+                    className={`w-6 sm:w-12 h-1 mx-0.5 sm:mx-1 rounded ${
                       isCompleted ? 'bg-status-completed' : 'bg-muted'
                     }`}
                   />
@@ -446,7 +699,10 @@ export default function Setup() {
                 <ChevronLeft className="mr-2 h-4 w-4" />
                 Voltar
               </Button>
-              <Button onClick={handleNext} disabled={isLoading}>
+              <Button 
+                onClick={handleNext} 
+                disabled={isLoading || !canProceed()}
+              >
                 {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {currentStep === steps.length - 1 ? 'Finalizar' : 'Próximo'}
                 {currentStep < steps.length - 1 && <ChevronRight className="ml-2 h-4 w-4" />}
