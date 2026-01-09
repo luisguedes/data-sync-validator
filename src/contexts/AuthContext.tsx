@@ -1,33 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import type { User, AuthState } from '@/types';
+import * as authService from '@/services/authService';
 
 interface AuthContextType extends AuthState {
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
   register: (email: string, password: string, name: string) => Promise<boolean>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-// Mock users for development
-const mockUsers: User[] = [
-  {
-    id: '1',
-    email: 'admin@conferencia.local',
-    name: 'Administrador',
-    role: 'admin',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-  {
-    id: '2',
-    email: 'colaborador@conferencia.local',
-    name: 'Colaborador Demo',
-    role: 'colaborador',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
@@ -36,34 +18,74 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading: true,
   });
 
+  // Initialize auth state from token
   useEffect(() => {
-    // Check for existing session
-    const storedUser = localStorage.getItem('auth_user');
-    if (storedUser) {
-      try {
-        const user = JSON.parse(storedUser);
-        setState({
-          user,
-          isAuthenticated: true,
-          isLoading: false,
-        });
-      } catch {
-        localStorage.removeItem('auth_user');
+    const initAuth = async () => {
+      const token = authService.getToken();
+      
+      if (token) {
+        // First, try to parse the token locally for immediate UI
+        const parsedUser = authService.parseToken(token);
+        
+        if (parsedUser) {
+          setState({
+            user: {
+              id: parsedUser.id,
+              email: parsedUser.email,
+              name: parsedUser.name,
+              role: parsedUser.role,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+            isAuthenticated: true,
+            isLoading: false,
+          });
+          
+          // Then verify with server in background
+          const serverUser = await authService.getCurrentUser();
+          if (serverUser) {
+            setState(prev => ({
+              ...prev,
+              user: {
+                id: serverUser.id,
+                email: serverUser.email,
+                name: serverUser.name,
+                role: serverUser.role,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+            }));
+          } else {
+            // Token invalid on server
+            authService.removeToken();
+            setState({ user: null, isAuthenticated: false, isLoading: false });
+          }
+        } else {
+          // Token expired or invalid
+          authService.removeToken();
+          setState({ user: null, isAuthenticated: false, isLoading: false });
+        }
+      } else {
         setState({ user: null, isAuthenticated: false, isLoading: false });
       }
-    } else {
-      setState({ user: null, isAuthenticated: false, isLoading: false });
-    }
+    };
+    
+    initAuth();
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {
-    // Mock authentication - in production, this would call the backend
-    const user = mockUsers.find(u => u.email === email);
+    const result = await authService.login(email, password);
     
-    if (user && password === 'demo123') {
-      localStorage.setItem('auth_user', JSON.stringify(user));
+    if (result.success && result.user) {
       setState({
-        user,
+        user: {
+          id: result.user.id,
+          email: result.user.email,
+          name: result.user.name,
+          role: result.user.role,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
         isAuthenticated: true,
         isLoading: false,
       });
@@ -74,7 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = () => {
-    localStorage.removeItem('auth_user');
+    authService.logout();
     setState({
       user: null,
       isAuthenticated: false,
@@ -83,28 +105,46 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const register = async (email: string, password: string, name: string): Promise<boolean> => {
-    // Mock registration - in production, this would call the backend
-    const newUser: User = {
-      id: String(Date.now()),
-      email,
-      name,
-      role: 'colaborador',
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
+    const result = await authService.register(email, password, name);
     
-    localStorage.setItem('auth_user', JSON.stringify(newUser));
-    setState({
-      user: newUser,
-      isAuthenticated: true,
-      isLoading: false,
-    });
+    if (result.success && result.user) {
+      setState({
+        user: {
+          id: result.user.id,
+          email: result.user.email,
+          name: result.user.name,
+          role: result.user.role,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+        isAuthenticated: true,
+        isLoading: false,
+      });
+      return true;
+    }
     
-    return true;
+    return false;
+  };
+
+  const refreshUser = async () => {
+    const user = await authService.getCurrentUser();
+    if (user) {
+      setState(prev => ({
+        ...prev,
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }));
+    }
   };
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, register }}>
+    <AuthContext.Provider value={{ ...state, login, logout, register, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

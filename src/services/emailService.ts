@@ -1,4 +1,5 @@
 import type { SmtpConfig } from '@/types';
+import { getAuthHeaders, getToken } from './authService';
 
 export interface EmailOptions {
   to: string;
@@ -13,61 +14,41 @@ export interface EmailResult {
   messageId?: string;
 }
 
-interface BackendSettings {
-  url: string;
-  apiKey?: string;
-}
-
 // Get backend configuration from localStorage
-const getBackendSettings = (): BackendSettings => {
+const getBackendUrl = (): string => {
   const settings = localStorage.getItem('app_settings');
   if (settings) {
     const parsed = JSON.parse(settings);
-    return {
-      url: parsed.preferences?.backendUrl || 'http://localhost:3001',
-      apiKey: parsed.preferences?.backendApiKey || '',
-    };
+    return parsed.preferences?.backendUrl || 'http://localhost:3001';
   }
-  return {
-    url: 'http://localhost:3001',
-    apiKey: '',
-  };
+  return 'http://localhost:3001';
 };
 
 /**
  * Envia email através do backend local
- * O backend deve expor POST /api/send-email
+ * Usa JWT token para autenticação (mais seguro que API key no frontend)
  */
 export async function sendEmail(options: EmailOptions): Promise<EmailResult> {
-  const { url: backendUrl, apiKey } = getBackendSettings();
-  
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-
-  // Add API key if configured
-  if (apiKey) {
-    headers['x-api-key'] = apiKey;
-  }
+  const backendUrl = getBackendUrl();
   
   try {
     const response = await fetch(`${backendUrl}/api/send-email`, {
       method: 'POST',
-      headers,
+      headers: getAuthHeaders(),
       body: JSON.stringify(options),
     });
 
     if (response.status === 401) {
       return {
         success: false,
-        message: 'API key não fornecida. Configure a chave nas configurações.',
+        message: 'Sessão expirada. Faça login novamente.',
       };
     }
 
     if (response.status === 403) {
       return {
         success: false,
-        message: 'API key inválida. Verifique a chave nas configurações.',
+        message: 'Sem permissão para enviar emails.',
       };
     }
 
@@ -107,23 +88,18 @@ export async function sendEmail(options: EmailOptions): Promise<EmailResult> {
  * Testa a conexão com o backend e SMTP
  */
 export async function testBackendConnection(): Promise<EmailResult> {
-  const { url: backendUrl, apiKey } = getBackendSettings();
+  const backendUrl = getBackendUrl();
   
-  const headers: Record<string, string> = {};
-  if (apiKey) {
-    headers['x-api-key'] = apiKey;
-  }
-
   try {
     const response = await fetch(`${backendUrl}/api/test-smtp`, {
       method: 'GET',
-      headers,
+      headers: getAuthHeaders(),
     });
 
     if (response.status === 401 || response.status === 403) {
       return {
         success: false,
-        message: 'Falha na autenticação. Verifique a API key.',
+        message: 'Sessão expirada ou sem permissão.',
       };
     }
 
@@ -145,14 +121,38 @@ export async function testBackendConnection(): Promise<EmailResult> {
  */
 export async function getBackendHealth(): Promise<{
   status: string;
-  authEnabled: boolean;
-  smtp: string;
-  uptime: number;
+  authMethods?: string[];
+  usersCount?: number;
+  smtp?: string;
+  uptime?: number;
 } | null> {
-  const { url: backendUrl } = getBackendSettings();
+  const backendUrl = getBackendUrl();
 
   try {
     const response = await fetch(`${backendUrl}/api/health`);
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Obtém informações detalhadas do backend (requer auth)
+ */
+export async function getBackendHealthDetailed(): Promise<{
+  status: string;
+  authMethod: string;
+  yourPermission: string;
+  checks: Record<string, unknown>;
+  stats: Record<string, unknown>;
+} | null> {
+  const backendUrl = getBackendUrl();
+
+  try {
+    const response = await fetch(`${backendUrl}/api/health/detailed`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) return null;
     return await response.json();
   } catch {
