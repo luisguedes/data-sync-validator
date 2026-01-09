@@ -13,7 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useConferences } from '@/hooks/useConferences';
 import { useTemplates } from '@/hooks/useTemplates';
 import { useConnections } from '@/hooks/useConnections';
+import { useEmailService } from '@/hooks/useEmailService';
 import { ConferenceFormModal, ConferenceFormData } from '@/components/conferences/ConferenceFormModal';
+import { ConferenceLinkModal } from '@/components/conferences/ConferenceLinkModal';
 import { DeleteConferenceDialog } from '@/components/conferences/DeleteConferenceDialog';
 import { toast } from 'sonner';
 import type { ConferenceStatus, Conference } from '@/types';
@@ -27,25 +29,57 @@ const statusConfig = {
 
 export default function Conferences() {
   const navigate = useNavigate();
-  const { conferences, searchTerm, setSearchTerm, statusFilter, setStatusFilter, createConference, deleteConference, copyLink, isLoading } = useConferences();
+  const { conferences, searchTerm, setSearchTerm, statusFilter, setStatusFilter, createConference, deleteConference, copyLink, regenerateLink, isLoading, getConference } = useConferences();
   const { allTemplates: templates } = useTemplates();
   const { allConnections: connections } = useConnections();
+  const { sendConferenceNotification, sendNewLinkNotification, isEmailEnabled } = useEmailService();
   
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
   const [selectedConference, setSelectedConference] = useState<Conference | null>(null);
+  const [createdConference, setCreatedConference] = useState<Conference | null>(null);
 
   const handleCreate = () => {
     setSelectedConference(null);
     setIsFormModalOpen(true);
   };
 
-  const handleSubmit = (data: ConferenceFormData) => {
+  const handleSubmit = async (data: ConferenceFormData) => {
     const template = templates.find(t => t.id === data.templateId);
     if (!template) return;
-    createConference(data, template);
-    toast.success('Conferência criada com sucesso');
+    
+    const newConference = createConference(data, template);
     setIsFormModalOpen(false);
+    
+    // Send email automatically if enabled
+    if (isEmailEnabled()) {
+      const emailResult = await sendConferenceNotification(newConference);
+      if (emailResult.success) {
+        toast.success('Conferência criada e email enviado!');
+      } else {
+        toast.success('Conferência criada!');
+        toast.warning(`Email: ${emailResult.message}`);
+      }
+    } else {
+      toast.success('Conferência criada com sucesso');
+    }
+    
+    // Show link modal
+    setCreatedConference(newConference);
+    setIsLinkModalOpen(true);
+  };
+
+  const handleResendEmail = async (conference: Conference) => {
+    return await sendNewLinkNotification(conference);
+  };
+
+  const handleRegenerateLink = (id: string) => {
+    const updated = regenerateLink(id);
+    if (updated) {
+      setCreatedConference(updated);
+    }
+    return updated;
   };
 
   const handleDelete = (conference: Conference) => {
@@ -151,6 +185,7 @@ export default function Conferences() {
       </div>
 
       <ConferenceFormModal open={isFormModalOpen} onOpenChange={setIsFormModalOpen} conference={selectedConference} templates={templates} connections={connections} onSubmit={handleSubmit} />
+      <ConferenceLinkModal open={isLinkModalOpen} onOpenChange={setIsLinkModalOpen} conference={createdConference} onResendEmail={handleResendEmail} onRegenerateLink={handleRegenerateLink} />
       <DeleteConferenceDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen} conference={selectedConference} onConfirm={handleConfirmDelete} />
     </div>
   );
