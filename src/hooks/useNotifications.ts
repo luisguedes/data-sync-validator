@@ -12,9 +12,56 @@ const DEFAULT_CONFIG: NotificationConfig = {
   expirationWarningHours: 24, // warn 24 hours before expiration
 };
 
-export function useNotifications(conferences: Conference[], config = DEFAULT_CONFIG) {
+interface NotificationCenterApi {
+  addNotification: (notification: {
+    type: 'error' | 'warning' | 'info' | 'success';
+    title: string;
+    description: string;
+    actionUrl?: string;
+  }) => void;
+  playSound: (type: 'error' | 'warning' | 'info' | 'success') => void;
+}
+
+export function useConferenceNotifications(
+  conferences: Conference[], 
+  config = DEFAULT_CONFIG,
+  notificationCenter?: NotificationCenterApi
+) {
   const notifiedExpirationsRef = useRef<Set<string>>(new Set());
   const notifiedFailuresRef = useRef<Set<string>>(new Set());
+
+  const notify = useCallback((
+    type: 'error' | 'warning' | 'info' | 'success',
+    title: string,
+    description: string,
+    actionUrl?: string
+  ) => {
+    // Show toast
+    const toastFn = type === 'error' ? toast.error : type === 'warning' ? toast.warning : type === 'info' ? toast.info : toast.success;
+    toastFn(title, {
+      description,
+      duration: type === 'error' || type === 'warning' ? 10000 : 8000,
+      action: actionUrl ? {
+        label: 'Ver',
+        onClick: () => window.location.href = actionUrl,
+      } : undefined,
+    });
+
+    // Add to notification center if available
+    if (notificationCenter) {
+      notificationCenter.addNotification({
+        type,
+        title,
+        description,
+        actionUrl,
+      });
+      
+      // Play sound for important notifications
+      if (type === 'error' || type === 'warning') {
+        notificationCenter.playSound(type);
+      }
+    }
+  }, [notificationCenter]);
 
   const checkExpiringConferences = useCallback(() => {
     const now = new Date();
@@ -30,14 +77,12 @@ export function useNotifications(conferences: Conference[], config = DEFAULT_CON
       // Already expired
       if (timeUntilExpiration <= 0 && !notifiedExpirationsRef.current.has(`expired-${conference.id}`)) {
         notifiedExpirationsRef.current.add(`expired-${conference.id}`);
-        toast.error(`Conferência Expirada`, {
-          description: `"${conference.name}" para ${conference.clientName} expirou.`,
-          duration: 10000,
-          action: {
-            label: 'Ver',
-            onClick: () => window.location.href = '/conferences',
-          },
-        });
+        notify(
+          'error',
+          'Conferência Expirada',
+          `"${conference.name}" para ${conference.clientName} expirou.`,
+          '/conferences'
+        );
       }
       // About to expire
       else if (
@@ -47,17 +92,15 @@ export function useNotifications(conferences: Conference[], config = DEFAULT_CON
       ) {
         notifiedExpirationsRef.current.add(`warning-${conference.id}`);
         const hoursLeft = Math.ceil(timeUntilExpiration / (60 * 60 * 1000));
-        toast.warning(`Conferência Expirando`, {
-          description: `"${conference.name}" expira em ${hoursLeft}h.`,
-          duration: 8000,
-          action: {
-            label: 'Ver',
-            onClick: () => window.location.href = '/conferences',
-          },
-        });
+        notify(
+          'warning',
+          'Conferência Expirando',
+          `"${conference.name}" expira em ${hoursLeft}h.`,
+          '/conferences'
+        );
       }
     });
-  }, [conferences, config.expirationWarningHours]);
+  }, [conferences, config.expirationWarningHours, notify]);
 
   const checkFailedEmails = useCallback(() => {
     conferences.forEach((conference) => {
@@ -74,14 +117,12 @@ export function useNotifications(conferences: Conference[], config = DEFAULT_CON
           
           if (emailTime >= fiveMinutesAgo) {
             notifiedFailuresRef.current.add(failureKey);
-            toast.error(`Falha no Envio de Email`, {
-              description: `Email para ${conference.clientEmail} falhou.`,
-              duration: 10000,
-              action: {
-                label: 'Detalhes',
-                onClick: () => window.location.href = '/conferences',
-              },
-            });
+            notify(
+              'error',
+              'Falha no Envio de Email',
+              `Email para ${conference.clientEmail} falhou.`,
+              '/conferences'
+            );
           } else {
             // Mark old failures as notified to avoid showing on next check
             notifiedFailuresRef.current.add(failureKey);
@@ -89,7 +130,7 @@ export function useNotifications(conferences: Conference[], config = DEFAULT_CON
         }
       });
     });
-  }, [conferences]);
+  }, [conferences, notify]);
 
   const checkPendingReminders = useCallback(() => {
     const storedSettings = localStorage.getItem('reminderSettings');
@@ -111,17 +152,15 @@ export function useNotifications(conferences: Conference[], config = DEFAULT_CON
       const notificationKey = `pending-reminder-${now.toDateString()}`;
       if (!notifiedExpirationsRef.current.has(notificationKey)) {
         notifiedExpirationsRef.current.add(notificationKey);
-        toast.info(`${pendingConferences.length} conferência(s) pendente(s)`, {
-          description: `Há conferências aguardando há mais de ${settings.daysThreshold} dias.`,
-          duration: 8000,
-          action: {
-            label: 'Ver',
-            onClick: () => window.location.href = '/settings',
-          },
-        });
+        notify(
+          'info',
+          `${pendingConferences.length} conferência(s) pendente(s)`,
+          `Há conferências aguardando há mais de ${settings.daysThreshold} dias.`,
+          '/settings'
+        );
       }
     }
-  }, [conferences]);
+  }, [conferences, notify]);
 
   // Run checks on mount and at intervals
   useEffect(() => {
