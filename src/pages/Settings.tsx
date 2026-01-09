@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useAppSettings } from '@/contexts/AppSettingsContext';
 import { useEmailService } from '@/hooks/useEmailService';
+import { useConferences } from '@/hooks/useConferences';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,13 +17,16 @@ import {
   Loader2,
   CheckCircle2,
   XCircle,
-  RefreshCw
+  RefreshCw,
+  Bell,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
+import { ReminderSettings } from '@/components/settings/ReminderSettings';
 
 export default function Settings() {
   const { settings, updatePreferences, updateSmtpConfig, updateDatabaseConfig } = useAppSettings();
-  const { testBackendConnection, testSmtpConnection } = useEmailService();
+  const { testBackendConnection, testSmtpConnection, sendNewLinkNotification } = useEmailService();
+  const { allConferences, addEmailToHistory, getConference } = useConferences();
   
   const [isLoading, setIsLoading] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -98,6 +102,26 @@ export default function Settings() {
     }
   };
 
+  const handleSendReminder = async (conferenceId: string) => {
+    const conference = getConference(conferenceId);
+    if (!conference) return;
+
+    const result = await sendNewLinkNotification(conference);
+    
+    addEmailToHistory(conferenceId, {
+      type: 'reminder',
+      to: conference.clientEmail,
+      subject: `Lembrete: ${conference.name}`,
+      status: result.success ? 'sent' : 'failed',
+      sentAt: new Date(),
+      error: result.success ? undefined : result.message,
+    });
+
+    if (!result.success) {
+      throw new Error(result.message);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -114,6 +138,10 @@ export default function Settings() {
         <TabsList>
           <TabsTrigger value="general">Geral</TabsTrigger>
           <TabsTrigger value="backend">Backend Local</TabsTrigger>
+          <TabsTrigger value="reminders" className="flex items-center gap-2">
+            <Bell className="h-4 w-4" />
+            Lembretes
+          </TabsTrigger>
           <TabsTrigger value="database">Banco de Dados</TabsTrigger>
           <TabsTrigger value="smtp">Email (SMTP)</TabsTrigger>
         </TabsList>
@@ -247,6 +275,13 @@ export default function Settings() {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="reminders">
+          <ReminderSettings 
+            conferences={allConferences}
+            onSendReminder={handleSendReminder}
+          />
         </TabsContent>
 
         <TabsContent value="database">

@@ -22,7 +22,8 @@ import {
   Loader2,
   BarChart3,
   Filter,
-  X
+  X,
+  Mail,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -35,9 +36,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useConferences } from '@/hooks/useConferences';
 import { useTemplates } from '@/hooks/useTemplates';
 import { Conference } from '@/types';
+import { EmailDashboard } from '@/components/reports/EmailDashboard';
 
 // Chart colors from CSS variables
 const CHART_COLORS = [
@@ -221,8 +224,18 @@ export default function Reports() {
         </p>
       </div>
 
-      {/* Filters */}
-      <Card>
+      <Tabs defaultValue="conferences" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="conferences">Conferências</TabsTrigger>
+          <TabsTrigger value="emails" className="flex items-center gap-2">
+            <Mail className="h-4 w-4" />
+            Emails
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="conferences" className="space-y-6">
+          {/* Filters */}
+          <Card>
         <CardHeader className="pb-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -480,6 +493,12 @@ export default function Reports() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="emails">
+          <EmailDashboard conferences={allConferences} />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
