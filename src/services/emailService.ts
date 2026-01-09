@@ -15,13 +15,33 @@ export interface EmailResult {
 }
 
 // Get backend configuration from localStorage
+// In production with nginx proxy, use relative URL (empty string)
+// In development, use localhost:3001
 const getBackendUrl = (): string => {
+  // First check if we have a stored backend URL
+  const storedUrl = localStorage.getItem('backend_url');
+  if (storedUrl) {
+    return storedUrl;
+  }
+  
   const settings = localStorage.getItem('app_settings');
   if (settings) {
-    const parsed = JSON.parse(settings);
-    return parsed.preferences?.backendUrl || 'http://localhost:3001';
+    try {
+      const parsed = JSON.parse(settings);
+      if (parsed.preferences?.backendUrl) {
+        return parsed.preferences.backendUrl;
+      }
+    } catch {
+      // ignore parse errors
+    }
   }
-  return 'http://localhost:3001';
+  
+  // Auto-detect: if running on same origin (production with nginx), use relative URLs
+  // This works because nginx proxies /api/* to the backend
+  const isProduction = window.location.hostname !== 'localhost' && 
+                       !window.location.hostname.includes('127.0.0.1');
+  
+  return isProduction ? '' : 'http://localhost:3001';
 };
 
 /**

@@ -49,10 +49,22 @@ const defaultSettings: AppSettings = {
   preferences: null,
 };
 
-// Get backend URL from localStorage or use default
+// Get backend URL from localStorage or auto-detect
+// In production with nginx proxy, use relative URL (empty string)
+// In development, use localhost:3001
 const getStoredBackendUrl = () => {
   const stored = localStorage.getItem('backend_url');
-  return stored || 'http://localhost:3001';
+  if (stored) {
+    return stored;
+  }
+  
+  // Auto-detect: if running on same origin (production with nginx), use relative URLs
+  // This works because nginx proxies /api/* to the backend
+  const isProduction = typeof window !== 'undefined' && 
+                       window.location.hostname !== 'localhost' && 
+                       !window.location.hostname.includes('127.0.0.1');
+  
+  return isProduction ? '' : 'http://localhost:3001';
 };
 
 export function AppSettingsProvider({ children }: { children: ReactNode }) {
