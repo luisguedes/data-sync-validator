@@ -17,6 +17,8 @@ const JWT_EXPIRY = process.env.JWT_EXPIRY || '15m'; // Short-lived access token
 const JWT_REFRESH_EXPIRY = process.env.JWT_REFRESH_EXPIRY || '7d'; // Long-lived refresh token
 const USERS_FILE = process.env.USERS_FILE || './users.json';
 const REFRESH_TOKENS_FILE = process.env.REFRESH_TOKENS_FILE || './refresh-tokens.json';
+const AUDIT_LOGS_FILE = process.env.AUDIT_LOGS_FILE || './audit-logs.json';
+const MAX_AUDIT_LOGS = parseInt(process.env.MAX_AUDIT_LOGS || '10000'); // Keep last 10k logs
 
 // Simple JWT implementation (no external dependencies)
 const base64UrlEncode = (str) => {
@@ -169,6 +171,108 @@ const revokeAllUserTokens = (userId) => {
 };
 
 loadRefreshTokens();
+
+// ============================================
+// Audit Log System
+// ============================================
+let auditLogs = [];
+
+const AUDIT_ACTIONS = {
+  // Auth
+  LOGIN_SUCCESS: 'auth.login.success',
+  LOGIN_FAILED: 'auth.login.failed',
+  LOGOUT: 'auth.logout',
+  REGISTER: 'auth.register',
+  TOKEN_REFRESH: 'auth.token.refresh',
+  
+  // Users
+  USER_CREATE: 'user.create',
+  USER_UPDATE: 'user.update',
+  USER_DELETE: 'user.delete',
+  USER_ACTIVATE: 'user.activate',
+  USER_DEACTIVATE: 'user.deactivate',
+  
+  // API Keys
+  APIKEY_CREATE: 'apikey.create',
+  APIKEY_UPDATE: 'apikey.update',
+  APIKEY_DELETE: 'apikey.delete',
+  APIKEY_REGENERATE: 'apikey.regenerate',
+  
+  // Email
+  EMAIL_SENT: 'email.sent',
+  EMAIL_FAILED: 'email.failed',
+  
+  // Settings
+  SETTINGS_UPDATE: 'settings.update',
+  
+  // Conference (logged from frontend via API)
+  CONFERENCE_CREATE: 'conference.create',
+  CONFERENCE_UPDATE: 'conference.update',
+  CONFERENCE_DELETE: 'conference.delete',
+  CONFERENCE_COMPLETE: 'conference.complete',
+};
+
+const loadAuditLogs = () => {
+  try {
+    if (fs.existsSync(AUDIT_LOGS_FILE)) {
+      const data = fs.readFileSync(AUDIT_LOGS_FILE, 'utf8');
+      auditLogs = JSON.parse(data);
+      console.log(`📋 Loaded ${auditLogs.length} audit log(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Error loading audit logs:', error.message);
+    auditLogs = [];
+  }
+};
+
+const saveAuditLogs = () => {
+  try {
+    // Keep only last MAX_AUDIT_LOGS entries
+    if (auditLogs.length > MAX_AUDIT_LOGS) {
+      auditLogs = auditLogs.slice(-MAX_AUDIT_LOGS);
+    }
+    fs.writeFileSync(AUDIT_LOGS_FILE, JSON.stringify(auditLogs, null, 2));
+  } catch (error) {
+    console.error('❌ Error saving audit logs:', error.message);
+  }
+};
+
+const createAuditLog = (action, details = {}, req = null) => {
+  const log = {
+    id: crypto.randomUUID(),
+    action,
+    timestamp: new Date().toISOString(),
+    userId: req?.user?.sub || details.userId || null,
+    userEmail: req?.user?.email || details.userEmail || null,
+    userName: req?.user?.name || details.userName || null,
+    ip: req?.ip || req?.headers?.['x-forwarded-for'] || details.ip || 'unknown',
+    userAgent: req?.headers?.['user-agent'] || details.userAgent || null,
+    details: {
+      ...details,
+      // Remove sensitive info
+      password: undefined,
+      passwordHash: undefined,
+      passwordSalt: undefined,
+      token: undefined,
+      refreshToken: undefined,
+      apiKey: undefined,
+    },
+    success: details.success !== false,
+  };
+  
+  auditLogs.push(log);
+  
+  // Save asynchronously (don't block the request)
+  setImmediate(saveAuditLogs);
+  
+  // Also log to console for monitoring
+  const emoji = log.success ? '✅' : '❌';
+  console.log(`${emoji} [AUDIT] ${action} by ${log.userEmail || 'anonymous'} - ${JSON.stringify(details.message || details.target || '')}`);
+  
+  return log;
+};
+
+loadAuditLogs();
 
 // ============================================
 // User Management
@@ -617,6 +721,11 @@ app.post('/api/auth/login', (req, res) => {
   const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
   
   if (!user) {
+    createAuditLog(AUDIT_ACTIONS.LOGIN_FAILED, {
+      success: false,
+      userEmail: email,
+      message: 'User not found',
+    }, req);
     return res.status(401).json({
       success: false,
       message: 'Email ou senha inválidos',
@@ -624,6 +733,12 @@ app.post('/api/auth/login', (req, res) => {
   }
   
   if (!user.active) {
+    createAuditLog(AUDIT_ACTIONS.LOGIN_FAILED, {
+      success: false,
+      userId: user.id,
+      userEmail: user.email,
+      message: 'User disabled',
+    }, req);
     return res.status(401).json({
       success: false,
       message: 'Usuário desativado',
@@ -631,6 +746,12 @@ app.post('/api/auth/login', (req, res) => {
   }
   
   if (!verifyPassword(password, user.passwordHash, user.passwordSalt)) {
+    createAuditLog(AUDIT_ACTIONS.LOGIN_FAILED, {
+      success: false,
+      userId: user.id,
+      userEmail: user.email,
+      message: 'Invalid password',
+    }, req);
     return res.status(401).json({
       success: false,
       message: 'Email ou senha inválidos',
@@ -652,7 +773,12 @@ app.post('/api/auth/login', (req, res) => {
   // Create refresh token (long-lived)
   const refreshToken = createRefreshToken(user.id);
   
-  console.log(`🔓 User logged in: ${user.email}`);
+  createAuditLog(AUDIT_ACTIONS.LOGIN_SUCCESS, {
+    userId: user.id,
+    userEmail: user.email,
+    userName: user.name,
+    message: 'Login successful',
+  }, req);
   
   res.json({
     success: true,
@@ -738,7 +864,13 @@ app.post('/api/auth/register', (req, res) => {
   
   const refreshToken = createRefreshToken(newUser.id);
   
-  console.log(`👤 New user registered: ${newUser.email}`);
+  createAuditLog(AUDIT_ACTIONS.REGISTER, {
+    userId: newUser.id,
+    userEmail: newUser.email,
+    userName: newUser.name,
+    target: newUser.email,
+    message: 'User registered',
+  }, req);
   
   res.status(201).json({
     success: true,
@@ -1332,7 +1464,7 @@ app.get('/api/test-smtp', async (req, res) => {
 });
 
 app.post('/api/send-email', async (req, res) => {
-  const { to, subject, html, text } = req.body;
+  const { to, subject, html, text, conferenceId, conferenceName } = req.body;
 
   if (!to || !subject || !html) {
     return res.status(400).json({ 
@@ -1366,8 +1498,15 @@ app.post('/api/send-email', async (req, res) => {
     });
 
     metrics.emails.sent++;
-    const sender = req.user?.email || req.apiKeyInfo?.name || 'Unknown';
-    console.log(`📧 Email enviado por ${sender}:`, info.messageId, 'para:', to);
+    
+    createAuditLog(AUDIT_ACTIONS.EMAIL_SENT, {
+      target: to,
+      subject,
+      messageId: info.messageId,
+      conferenceId,
+      conferenceName,
+      message: `Email sent to ${to}`,
+    }, req);
     
     res.json({ 
       success: true, 
@@ -1376,12 +1515,187 @@ app.post('/api/send-email', async (req, res) => {
     });
   } catch (error) {
     metrics.emails.failed++;
-    console.error('❌ Erro ao enviar email:', error);
+    
+    createAuditLog(AUDIT_ACTIONS.EMAIL_FAILED, {
+      success: false,
+      target: to,
+      subject,
+      conferenceId,
+      conferenceName,
+      error: error.message,
+      message: `Failed to send email to ${to}`,
+    }, req);
+    
     res.status(500).json({ 
       success: false, 
       message: error.message 
     });
   }
+});
+
+// ============================================
+// Audit Log Endpoints
+// ============================================
+
+// Get audit logs (admin only)
+app.get('/api/audit-logs', (req, res) => {
+  // Check admin permission
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem visualizar logs de auditoria',
+    });
+  }
+  
+  const { 
+    action, 
+    userId, 
+    userEmail,
+    startDate, 
+    endDate, 
+    success: successFilter,
+    limit = 100,
+    offset = 0,
+    search,
+  } = req.query;
+  
+  let filteredLogs = [...auditLogs];
+  
+  // Apply filters
+  if (action) {
+    filteredLogs = filteredLogs.filter(log => log.action.includes(action));
+  }
+  if (userId) {
+    filteredLogs = filteredLogs.filter(log => log.userId === userId);
+  }
+  if (userEmail) {
+    filteredLogs = filteredLogs.filter(log => 
+      log.userEmail?.toLowerCase().includes(userEmail.toLowerCase())
+    );
+  }
+  if (startDate) {
+    const start = new Date(startDate).getTime();
+    filteredLogs = filteredLogs.filter(log => new Date(log.timestamp).getTime() >= start);
+  }
+  if (endDate) {
+    const end = new Date(endDate).getTime();
+    filteredLogs = filteredLogs.filter(log => new Date(log.timestamp).getTime() <= end);
+  }
+  if (successFilter !== undefined) {
+    const isSuccess = successFilter === 'true';
+    filteredLogs = filteredLogs.filter(log => log.success === isSuccess);
+  }
+  if (search) {
+    const searchLower = search.toLowerCase();
+    filteredLogs = filteredLogs.filter(log => 
+      log.action.toLowerCase().includes(searchLower) ||
+      log.userEmail?.toLowerCase().includes(searchLower) ||
+      log.userName?.toLowerCase().includes(searchLower) ||
+      JSON.stringify(log.details).toLowerCase().includes(searchLower)
+    );
+  }
+  
+  // Sort by timestamp descending (newest first)
+  filteredLogs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  
+  // Pagination
+  const total = filteredLogs.length;
+  const paginatedLogs = filteredLogs.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
+  
+  res.json({
+    success: true,
+    logs: paginatedLogs,
+    pagination: {
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      hasMore: parseInt(offset) + parseInt(limit) < total,
+    },
+    actions: Object.values(AUDIT_ACTIONS),
+  });
+});
+
+// Get audit log summary/stats (admin only)
+app.get('/api/audit-logs/stats', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem visualizar estatísticas',
+    });
+  }
+  
+  const { days = 7 } = req.query;
+  const cutoff = Date.now() - (parseInt(days) * 24 * 60 * 60 * 1000);
+  
+  const recentLogs = auditLogs.filter(log => new Date(log.timestamp).getTime() >= cutoff);
+  
+  // Group by action
+  const byAction = {};
+  recentLogs.forEach(log => {
+    byAction[log.action] = (byAction[log.action] || 0) + 1;
+  });
+  
+  // Group by user
+  const byUser = {};
+  recentLogs.forEach(log => {
+    if (log.userEmail) {
+      byUser[log.userEmail] = (byUser[log.userEmail] || 0) + 1;
+    }
+  });
+  
+  // Success/failure rate
+  const successCount = recentLogs.filter(log => log.success).length;
+  const failureCount = recentLogs.filter(log => !log.success).length;
+  
+  // Activity by day
+  const byDay = {};
+  recentLogs.forEach(log => {
+    const day = new Date(log.timestamp).toISOString().split('T')[0];
+    byDay[day] = (byDay[day] || 0) + 1;
+  });
+  
+  res.json({
+    success: true,
+    stats: {
+      total: recentLogs.length,
+      success: successCount,
+      failure: failureCount,
+      byAction,
+      byUser,
+      byDay,
+      periodDays: parseInt(days),
+    },
+  });
+});
+
+// Log action from frontend (for conference actions)
+app.post('/api/audit-logs', (req, res) => {
+  const { action, details } = req.body;
+  
+  // Validate action is allowed from frontend
+  const allowedActions = [
+    AUDIT_ACTIONS.CONFERENCE_CREATE,
+    AUDIT_ACTIONS.CONFERENCE_UPDATE,
+    AUDIT_ACTIONS.CONFERENCE_DELETE,
+    AUDIT_ACTIONS.CONFERENCE_COMPLETE,
+    AUDIT_ACTIONS.SETTINGS_UPDATE,
+  ];
+  
+  if (!action || !allowedActions.includes(action)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Ação inválida ou não permitida',
+    });
+  }
+  
+  const log = createAuditLog(action, details || {}, req);
+  
+  res.json({
+    success: true,
+    logId: log.id,
+  });
 });
 
 // ============================================
@@ -1391,6 +1705,7 @@ const shutdown = (signal) => {
   console.log(`🛑 ${signal} received, saving data and closing connections...`);
   saveApiKeys();
   saveUsers();
+  saveAuditLogs();
   transporter.close();
   process.exit(0);
 };
