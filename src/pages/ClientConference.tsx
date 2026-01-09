@@ -14,7 +14,8 @@ import {
   Loader2,
   ShieldAlert,
   ArrowRight,
-  ListChecks
+  ListChecks,
+  Mail
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -292,6 +293,18 @@ export default function ClientConference() {
   
   // Render expired state
   if (step === 'expired') {
+    const handleRequestNewLink = async () => {
+      // Attempt to find expired conference to show contact info
+      const allConferences = JSON.parse(localStorage.getItem('app_conferences') || '[]');
+      const expiredConference = allConferences.find((c: any) => c.linkToken === token);
+      
+      if (expiredConference) {
+        toast.info(`Entre em contato com o responsável pelo email ou telefone para solicitar um novo link.`);
+      } else {
+        toast.info('Não foi possível identificar a conferência. Entre em contato com o responsável.');
+      }
+    };
+
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
         <Card className="max-w-md w-full">
@@ -300,8 +313,17 @@ export default function ClientConference() {
             <h1 className="text-2xl font-bold">Link Expirado</h1>
             <p className="text-muted-foreground">
               O link de acesso a esta conferência expirou.
-              Por favor, entre em contato com o responsável para obter um novo link.
+              Você pode solicitar um novo link ao responsável.
             </p>
+            <div className="pt-2 space-y-3">
+              <Button onClick={handleRequestNewLink} className="w-full">
+                <Mail className="mr-2 h-4 w-4" />
+                Solicitar Novo Link
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Ao clicar, você será orientado sobre como entrar em contato com o responsável.
+              </p>
+            </div>
           </CardContent>
         </Card>
       </div>
