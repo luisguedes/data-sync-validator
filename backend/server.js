@@ -18,7 +18,9 @@ const JWT_REFRESH_EXPIRY = process.env.JWT_REFRESH_EXPIRY || '7d'; // Long-lived
 const USERS_FILE = process.env.USERS_FILE || './users.json';
 const REFRESH_TOKENS_FILE = process.env.REFRESH_TOKENS_FILE || './refresh-tokens.json';
 const AUDIT_LOGS_FILE = process.env.AUDIT_LOGS_FILE || './audit-logs.json';
+const ALERTS_FILE = process.env.ALERTS_FILE || './security-alerts.json';
 const MAX_AUDIT_LOGS = parseInt(process.env.MAX_AUDIT_LOGS || '10000'); // Keep last 10k logs
+const MAX_ALERTS = parseInt(process.env.MAX_ALERTS || '1000'); // Keep last 1k alerts
 
 // Simple JWT implementation (no external dependencies)
 const base64UrlEncode = (str) => {
@@ -269,10 +271,202 @@ const createAuditLog = (action, details = {}, req = null) => {
   const emoji = log.success ? '✅' : '❌';
   console.log(`${emoji} [AUDIT] ${action} by ${log.userEmail || 'anonymous'} - ${JSON.stringify(details.message || details.target || '')}`);
   
+  // Check for security alerts
+  setImmediate(() => checkSecurityAlerts(log));
+  
   return log;
 };
 
 loadAuditLogs();
+
+// ============================================
+// Security Alerts System
+// ============================================
+let securityAlerts = [];
+
+const ALERT_TYPES = {
+  BRUTE_FORCE: 'brute_force',
+  MULTIPLE_FAILED_LOGINS: 'multiple_failed_logins',
+  ADMIN_ACTION: 'admin_action',
+  USER_DELETED: 'user_deleted',
+  APIKEY_DELETED: 'apikey_deleted',
+  MASS_DELETION: 'mass_deletion',
+  UNUSUAL_ACTIVITY: 'unusual_activity',
+  NEW_ADMIN: 'new_admin',
+};
+
+const ALERT_SEVERITY = {
+  LOW: 'low',
+  MEDIUM: 'medium',
+  HIGH: 'high',
+  CRITICAL: 'critical',
+};
+
+const loadAlerts = () => {
+  try {
+    if (fs.existsSync(ALERTS_FILE)) {
+      const data = fs.readFileSync(ALERTS_FILE, 'utf8');
+      securityAlerts = JSON.parse(data);
+      console.log(`🚨 Loaded ${securityAlerts.length} security alert(s)`);
+    }
+  } catch (error) {
+    console.error('❌ Error loading alerts:', error.message);
+    securityAlerts = [];
+  }
+};
+
+const saveAlerts = () => {
+  try {
+    if (securityAlerts.length > MAX_ALERTS) {
+      securityAlerts = securityAlerts.slice(-MAX_ALERTS);
+    }
+    fs.writeFileSync(ALERTS_FILE, JSON.stringify(securityAlerts, null, 2));
+  } catch (error) {
+    console.error('❌ Error saving alerts:', error.message);
+  }
+};
+
+const createAlert = (type, severity, title, description, details = {}) => {
+  const alert = {
+    id: crypto.randomUUID(),
+    type,
+    severity,
+    title,
+    description,
+    details,
+    timestamp: new Date().toISOString(),
+    acknowledged: false,
+    acknowledgedBy: null,
+    acknowledgedAt: null,
+  };
+  
+  securityAlerts.push(alert);
+  setImmediate(saveAlerts);
+  
+  // Log to console with severity indicator
+  const severityEmoji = {
+    [ALERT_SEVERITY.LOW]: '🔵',
+    [ALERT_SEVERITY.MEDIUM]: '🟡',
+    [ALERT_SEVERITY.HIGH]: '🟠',
+    [ALERT_SEVERITY.CRITICAL]: '🔴',
+  };
+  console.log(`${severityEmoji[severity] || '⚠️'} [ALERT] ${severity.toUpperCase()}: ${title} - ${description}`);
+  
+  return alert;
+};
+
+// Check for security patterns that should trigger alerts
+const checkSecurityAlerts = (log) => {
+  const now = Date.now();
+  const fiveMinutesAgo = now - (5 * 60 * 1000);
+  const oneHourAgo = now - (60 * 60 * 1000);
+  
+  // Check for brute force / multiple failed logins
+  if (log.action === AUDIT_ACTIONS.LOGIN_FAILED) {
+    const recentFailedLogins = auditLogs.filter(l => 
+      l.action === AUDIT_ACTIONS.LOGIN_FAILED &&
+      new Date(l.timestamp).getTime() >= fiveMinutesAgo &&
+      l.ip === log.ip
+    );
+    
+    if (recentFailedLogins.length >= 5) {
+      // Check if we already have an alert for this
+      const existingAlert = securityAlerts.find(a => 
+        a.type === ALERT_TYPES.BRUTE_FORCE &&
+        a.details.ip === log.ip &&
+        new Date(a.timestamp).getTime() >= fiveMinutesAgo
+      );
+      
+      if (!existingAlert) {
+        createAlert(
+          ALERT_TYPES.BRUTE_FORCE,
+          ALERT_SEVERITY.HIGH,
+          'Tentativa de Força Bruta Detectada',
+          `${recentFailedLogins.length} tentativas de login falhadas do IP ${log.ip} nos últimos 5 minutos`,
+          { ip: log.ip, attempts: recentFailedLogins.length, targetEmail: log.userEmail }
+        );
+      }
+    } else if (recentFailedLogins.length >= 3) {
+      const existingAlert = securityAlerts.find(a => 
+        a.type === ALERT_TYPES.MULTIPLE_FAILED_LOGINS &&
+        a.details.ip === log.ip &&
+        new Date(a.timestamp).getTime() >= fiveMinutesAgo
+      );
+      
+      if (!existingAlert) {
+        createAlert(
+          ALERT_TYPES.MULTIPLE_FAILED_LOGINS,
+          ALERT_SEVERITY.MEDIUM,
+          'Múltiplas Falhas de Login',
+          `${recentFailedLogins.length} tentativas de login falhadas do IP ${log.ip}`,
+          { ip: log.ip, attempts: recentFailedLogins.length, targetEmail: log.userEmail }
+        );
+      }
+    }
+  }
+  
+  // Check for user deletion
+  if (log.action === AUDIT_ACTIONS.USER_DELETE) {
+    createAlert(
+      ALERT_TYPES.USER_DELETED,
+      ALERT_SEVERITY.HIGH,
+      'Usuário Deletado',
+      `Usuário foi deletado por ${log.userEmail || 'desconhecido'}`,
+      { deletedUser: log.details?.target, deletedBy: log.userEmail }
+    );
+  }
+  
+  // Check for API key deletion
+  if (log.action === AUDIT_ACTIONS.APIKEY_DELETE) {
+    createAlert(
+      ALERT_TYPES.APIKEY_DELETED,
+      ALERT_SEVERITY.MEDIUM,
+      'API Key Deletada',
+      `API Key foi deletada por ${log.userEmail || 'desconhecido'}`,
+      { keyName: log.details?.target, deletedBy: log.userEmail }
+    );
+  }
+  
+  // Check for new admin creation
+  if (log.action === AUDIT_ACTIONS.USER_CREATE && log.details?.role === 'admin') {
+    createAlert(
+      ALERT_TYPES.NEW_ADMIN,
+      ALERT_SEVERITY.HIGH,
+      'Novo Administrador Criado',
+      `Novo admin ${log.details?.target || 'desconhecido'} criado por ${log.userEmail}`,
+      { newAdmin: log.details?.target, createdBy: log.userEmail }
+    );
+  }
+  
+  // Check for mass deletion (multiple deletes in short time)
+  const recentDeletes = auditLogs.filter(l => 
+    (l.action === AUDIT_ACTIONS.USER_DELETE || 
+     l.action === AUDIT_ACTIONS.APIKEY_DELETE ||
+     l.action === AUDIT_ACTIONS.CONFERENCE_DELETE) &&
+    new Date(l.timestamp).getTime() >= fiveMinutesAgo &&
+    l.userId === log.userId
+  );
+  
+  if (recentDeletes.length >= 3) {
+    const existingAlert = securityAlerts.find(a => 
+      a.type === ALERT_TYPES.MASS_DELETION &&
+      a.details.userId === log.userId &&
+      new Date(a.timestamp).getTime() >= fiveMinutesAgo
+    );
+    
+    if (!existingAlert) {
+      createAlert(
+        ALERT_TYPES.MASS_DELETION,
+        ALERT_SEVERITY.CRITICAL,
+        'Deleção em Massa Detectada',
+        `${recentDeletes.length} itens deletados por ${log.userEmail} nos últimos 5 minutos`,
+        { userId: log.userId, userEmail: log.userEmail, count: recentDeletes.length }
+      );
+    }
+  }
+};
+
+loadAlerts();
 
 // ============================================
 // User Management
@@ -1699,6 +1893,188 @@ app.post('/api/audit-logs', (req, res) => {
 });
 
 // ============================================
+// Security Alerts Endpoints
+// ============================================
+
+// Get security alerts (admin only)
+app.get('/api/alerts', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem visualizar alertas',
+    });
+  }
+  
+  const { 
+    severity, 
+    type,
+    acknowledged,
+    limit = 50,
+    offset = 0,
+  } = req.query;
+  
+  let filteredAlerts = [...securityAlerts];
+  
+  // Apply filters
+  if (severity) {
+    filteredAlerts = filteredAlerts.filter(a => a.severity === severity);
+  }
+  if (type) {
+    filteredAlerts = filteredAlerts.filter(a => a.type === type);
+  }
+  if (acknowledged !== undefined) {
+    const isAcknowledged = acknowledged === 'true';
+    filteredAlerts = filteredAlerts.filter(a => a.acknowledged === isAcknowledged);
+  }
+  
+  // Sort by timestamp descending
+  filteredAlerts.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  
+  // Count unacknowledged
+  const unacknowledgedCount = securityAlerts.filter(a => !a.acknowledged).length;
+  
+  // Pagination
+  const total = filteredAlerts.length;
+  const paginatedAlerts = filteredAlerts.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
+  
+  res.json({
+    success: true,
+    alerts: paginatedAlerts,
+    unacknowledgedCount,
+    pagination: {
+      total,
+      limit: parseInt(limit),
+      offset: parseInt(offset),
+      hasMore: parseInt(offset) + parseInt(limit) < total,
+    },
+    types: Object.values(ALERT_TYPES),
+    severities: Object.values(ALERT_SEVERITY),
+  });
+});
+
+// Get unacknowledged alert count (for polling)
+app.get('/api/alerts/count', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem visualizar alertas',
+    });
+  }
+  
+  const unacknowledgedCount = securityAlerts.filter(a => !a.acknowledged).length;
+  const criticalCount = securityAlerts.filter(a => !a.acknowledged && a.severity === ALERT_SEVERITY.CRITICAL).length;
+  const highCount = securityAlerts.filter(a => !a.acknowledged && a.severity === ALERT_SEVERITY.HIGH).length;
+  
+  // Get latest unacknowledged alerts for notification
+  const latestAlerts = securityAlerts
+    .filter(a => !a.acknowledged)
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 5);
+  
+  res.json({
+    success: true,
+    count: unacknowledgedCount,
+    critical: criticalCount,
+    high: highCount,
+    latest: latestAlerts,
+  });
+});
+
+// Acknowledge alert
+app.put('/api/alerts/:id/acknowledge', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem gerenciar alertas',
+    });
+  }
+  
+  const { id } = req.params;
+  const alertIndex = securityAlerts.findIndex(a => a.id === id);
+  
+  if (alertIndex === -1) {
+    return res.status(404).json({
+      success: false,
+      message: 'Alerta não encontrado',
+    });
+  }
+  
+  securityAlerts[alertIndex].acknowledged = true;
+  securityAlerts[alertIndex].acknowledgedBy = req.user?.email || 'Unknown';
+  securityAlerts[alertIndex].acknowledgedAt = new Date().toISOString();
+  
+  saveAlerts();
+  
+  res.json({
+    success: true,
+    message: 'Alerta reconhecido',
+    alert: securityAlerts[alertIndex],
+  });
+});
+
+// Acknowledge all alerts
+app.put('/api/alerts/acknowledge-all', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem gerenciar alertas',
+    });
+  }
+  
+  const now = new Date().toISOString();
+  let count = 0;
+  
+  securityAlerts.forEach(alert => {
+    if (!alert.acknowledged) {
+      alert.acknowledged = true;
+      alert.acknowledgedBy = req.user?.email || 'Unknown';
+      alert.acknowledgedAt = now;
+      count++;
+    }
+  });
+  
+  saveAlerts();
+  
+  res.json({
+    success: true,
+    message: `${count} alertas reconhecidos`,
+    count,
+  });
+});
+
+// Delete old alerts (admin only)
+app.delete('/api/alerts/old', (req, res) => {
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === 'admin';
+  if (!isAdmin) {
+    return res.status(403).json({
+      success: false,
+      message: 'Apenas administradores podem gerenciar alertas',
+    });
+  }
+  
+  const { days = 30 } = req.query;
+  const cutoff = Date.now() - (parseInt(days) * 24 * 60 * 60 * 1000);
+  
+  const originalCount = securityAlerts.length;
+  securityAlerts = securityAlerts.filter(a => 
+    new Date(a.timestamp).getTime() >= cutoff || !a.acknowledged
+  );
+  
+  const deletedCount = originalCount - securityAlerts.length;
+  saveAlerts();
+  
+  res.json({
+    success: true,
+    message: `${deletedCount} alertas antigos removidos`,
+    deletedCount,
+  });
+});
+
+// ============================================
 // Graceful Shutdown
 // ============================================
 const shutdown = (signal) => {
@@ -1706,6 +2082,7 @@ const shutdown = (signal) => {
   saveApiKeys();
   saveUsers();
   saveAuditLogs();
+  saveAlerts();
   transporter.close();
   process.exit(0);
 };
