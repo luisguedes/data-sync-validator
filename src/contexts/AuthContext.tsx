@@ -41,6 +41,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             isLoading: false,
           });
           
+          // Start automatic token refresh
+          authService.startTokenRefresh();
+          
           // Then verify with server in background
           const serverUser = await authService.getCurrentUser();
           if (serverUser) {
@@ -57,26 +60,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }));
           } else {
             // Token invalid on server
-            authService.removeToken();
+            authService.removeTokens();
+            authService.stopTokenRefresh();
             setState({ user: null, isAuthenticated: false, isLoading: false });
           }
         } else {
-          // Token expired or invalid
-          authService.removeToken();
+          // Token expired - try to refresh
+          const newToken = await authService.refreshAccessToken();
+          if (newToken) {
+            const refreshedUser = authService.parseToken(newToken);
+            if (refreshedUser) {
+              authService.startTokenRefresh();
+              setState({
+                user: {
+                  id: refreshedUser.id,
+                  email: refreshedUser.email,
+                  name: refreshedUser.name,
+                  role: refreshedUser.role,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                },
+                isAuthenticated: true,
+                isLoading: false,
+              });
+              return;
+            }
+          }
+          // Couldn't refresh
+          authService.removeTokens();
           setState({ user: null, isAuthenticated: false, isLoading: false });
         }
       } else {
+        // No token, try refresh token
+        const refreshToken = authService.getRefreshToken();
+        if (refreshToken) {
+          const newToken = await authService.refreshAccessToken();
+          if (newToken) {
+            const refreshedUser = authService.parseToken(newToken);
+            if (refreshedUser) {
+              authService.startTokenRefresh();
+              setState({
+                user: {
+                  id: refreshedUser.id,
+                  email: refreshedUser.email,
+                  name: refreshedUser.name,
+                  role: refreshedUser.role,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                },
+                isAuthenticated: true,
+                isLoading: false,
+              });
+              return;
+            }
+          }
+        }
         setState({ user: null, isAuthenticated: false, isLoading: false });
       }
     };
     
     initAuth();
+    
+    // Cleanup on unmount
+    return () => {
+      authService.stopTokenRefresh();
+    };
   }, []);
 
   const login = async (email: string, password: string): Promise<boolean> => {
     const result = await authService.login(email, password);
     
     if (result.success && result.user) {
+      authService.startTokenRefresh();
       setState({
         user: {
           id: result.user.id,
@@ -95,8 +150,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return false;
   };
 
-  const logout = () => {
-    authService.logout();
+  const logout = async () => {
+    authService.stopTokenRefresh();
+    await authService.logout();
     setState({
       user: null,
       isAuthenticated: false,
@@ -108,6 +164,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await authService.register(email, password, name);
     
     if (result.success && result.user) {
+      authService.startTokenRefresh();
       setState({
         user: {
           id: result.user.id,

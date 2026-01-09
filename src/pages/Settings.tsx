@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useAppSettings } from '@/contexts/AppSettingsContext';
 import { useEmailService } from '@/hooks/useEmailService';
 import { useConferences } from '@/hooks/useConferences';
+import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -20,11 +21,15 @@ import {
   RefreshCw,
   Bell,
   Key,
+  Users,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
 import { ReminderSettings } from '@/components/settings/ReminderSettings';
 import { ApiKeyManager } from '@/components/settings/ApiKeyManager';
+import { UserManager } from '@/components/settings/UserManager';
+
 export default function Settings() {
+  const { user } = useAuth();
   const { settings, updatePreferences, updateSmtpConfig, updateDatabaseConfig } = useAppSettings();
   const { testBackendConnection, testSmtpConnection, sendNewLinkNotification } = useEmailService();
   const { allConferences, addEmailToHistory, getConference } = useConferences();
@@ -141,6 +146,12 @@ export default function Settings() {
         <TabsList className="flex-wrap h-auto gap-1">
           <TabsTrigger value="general">Geral</TabsTrigger>
           <TabsTrigger value="backend">Backend Local</TabsTrigger>
+          {user?.role === 'admin' && (
+            <TabsTrigger value="users" className="flex items-center gap-2">
+              <Users className="h-4 w-4" />
+              Usuários
+            </TabsTrigger>
+          )}
           <TabsTrigger value="api-keys" className="flex items-center gap-2">
             <Key className="h-4 w-4" />
             API Keys
@@ -297,6 +308,12 @@ export default function Settings() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {user?.role === 'admin' && (
+          <TabsContent value="users">
+            <UserManager backendUrl={preferences.backendUrl || ''} />
+          </TabsContent>
+        )}
 
         <TabsContent value="api-keys">
           <ApiKeyManager 

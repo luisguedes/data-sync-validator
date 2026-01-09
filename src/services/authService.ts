@@ -1,5 +1,5 @@
 /**
- * Authentication Service - Connects to local backend JWT auth
+ * Authentication Service - Connects to local backend JWT auth with refresh tokens
  */
 
 export interface AuthUser {
@@ -11,12 +11,14 @@ export interface AuthUser {
 
 export interface LoginResponse {
   success: boolean;
-  token?: string;
+  accessToken?: string;
+  refreshToken?: string;
   user?: AuthUser;
   message?: string;
 }
 
-const TOKEN_KEY = 'auth_token';
+const ACCESS_TOKEN_KEY = 'auth_token';
+const REFRESH_TOKEN_KEY = 'auth_refresh_token';
 
 // Get backend URL from settings or default
 const getBackendUrl = (): string => {
@@ -28,20 +30,33 @@ const getBackendUrl = (): string => {
   return 'http://localhost:3001';
 };
 
-// Get stored token
+// Get stored tokens
 export const getToken = (): string | null => {
-  return localStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(ACCESS_TOKEN_KEY);
 };
 
-// Store token
-export const setToken = (token: string): void => {
-  localStorage.setItem(TOKEN_KEY, token);
+export const getRefreshToken = (): string | null => {
+  return localStorage.getItem(REFRESH_TOKEN_KEY);
 };
 
-// Remove token
-export const removeToken = (): void => {
-  localStorage.removeItem(TOKEN_KEY);
+// Store tokens
+export const setTokens = (accessToken: string, refreshToken?: string): void => {
+  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
+  if (refreshToken) {
+    localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+  }
 };
+
+// Remove tokens
+export const removeTokens = (): void => {
+  localStorage.removeItem(ACCESS_TOKEN_KEY);
+  localStorage.removeItem(REFRESH_TOKEN_KEY);
+  localStorage.removeItem('auth_user'); // Remove old mock auth
+};
+
+// Alias for backward compatibility
+export const setToken = (token: string): void => setTokens(token);
+export const removeToken = (): void => removeTokens();
 
 // Get auth headers
 export const getAuthHeaders = (): Record<string, string> => {
@@ -57,6 +72,68 @@ export const getAuthHeaders = (): Record<string, string> => {
   return headers;
 };
 
+// Check if token is expired or about to expire (within 1 minute)
+export const isTokenExpired = (token: string, bufferSeconds = 60): boolean => {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return true;
+    
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    const expiresAt = payload.exp * 1000;
+    const bufferMs = bufferSeconds * 1000;
+    
+    return Date.now() >= expiresAt - bufferMs;
+  } catch {
+    return true;
+  }
+};
+
+// Refresh the access token using refresh token
+export async function refreshAccessToken(): Promise<string | null> {
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return null;
+  
+  const backendUrl = getBackendUrl();
+  
+  try {
+    const response = await fetch(`${backendUrl}/api/auth/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success && data.accessToken) {
+        setTokens(data.accessToken);
+        console.log('🔄 Access token refreshed');
+        return data.accessToken;
+      }
+    }
+    
+    // Refresh token invalid or expired
+    removeTokens();
+    return null;
+  } catch (error) {
+    console.error('Token refresh error:', error);
+    return null;
+  }
+}
+
+// Get valid token (refresh if needed)
+export async function getValidToken(): Promise<string | null> {
+  const token = getToken();
+  
+  if (!token) return null;
+  
+  // If token is expired or about to expire, try to refresh
+  if (isTokenExpired(token)) {
+    return await refreshAccessToken();
+  }
+  
+  return token;
+}
+
 // Login
 export async function login(email: string, password: string): Promise<LoginResponse> {
   const backendUrl = getBackendUrl();
@@ -71,10 +148,11 @@ export async function login(email: string, password: string): Promise<LoginRespo
     const data = await response.json();
     
     if (response.ok && data.success) {
-      setToken(data.token);
+      setTokens(data.accessToken, data.refreshToken);
       return {
         success: true,
-        token: data.token,
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
         user: data.user,
       };
     }
@@ -106,10 +184,11 @@ export async function register(email: string, password: string, name: string): P
     const data = await response.json();
     
     if (response.ok && data.success) {
-      setToken(data.token);
+      setTokens(data.accessToken, data.refreshToken);
       return {
         success: true,
-        token: data.token,
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
         user: data.user,
       };
     }
@@ -129,14 +208,18 @@ export async function register(email: string, password: string, name: string): P
 
 // Get current user
 export async function getCurrentUser(): Promise<AuthUser | null> {
-  const token = getToken();
+  // First try to get a valid token (refresh if needed)
+  const token = await getValidToken();
   if (!token) return null;
   
   const backendUrl = getBackendUrl();
   
   try {
     const response = await fetch(`${backendUrl}/api/auth/me`, {
-      headers: getAuthHeaders(),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
     });
     
     if (response.ok) {
@@ -144,9 +227,23 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
       return data.user;
     }
     
-    // Token invalid or expired
+    // Token invalid on server
     if (response.status === 401) {
-      removeToken();
+      // Try one more refresh
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        const retryResponse = await fetch(`${backendUrl}/api/auth/me`, {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${newToken}`,
+          },
+        });
+        if (retryResponse.ok) {
+          const data = await retryResponse.json();
+          return data.user;
+        }
+      }
+      removeTokens();
     }
     
     return null;
@@ -157,14 +254,33 @@ export async function getCurrentUser(): Promise<AuthUser | null> {
 }
 
 // Logout
-export function logout(): void {
-  removeToken();
-  localStorage.removeItem('auth_user'); // Remove old mock auth
+export async function logout(revokeAll = false): Promise<void> {
+  const refreshToken = getRefreshToken();
+  const backendUrl = getBackendUrl();
+  
+  // Try to revoke the refresh token on server
+  if (refreshToken) {
+    try {
+      await fetch(`${backendUrl}/api/auth/logout`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ refreshToken, revokeAll }),
+      });
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+  }
+  
+  removeTokens();
 }
 
 // Check if authenticated
 export function isAuthenticated(): boolean {
-  return !!getToken();
+  const token = getToken();
+  if (!token) return false;
+  
+  // Check if token is not expired (with no buffer - we'll refresh if needed)
+  return !isTokenExpired(token, 0);
 }
 
 // Parse JWT payload (without verification - verification is server-side)
@@ -175,9 +291,8 @@ export function parseToken(token: string): AuthUser | null {
     
     const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
     
-    // Check expiration
+    // Check expiration (with no buffer for immediate parsing)
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      removeToken();
       return null;
     }
     
@@ -189,5 +304,27 @@ export function parseToken(token: string): AuthUser | null {
     };
   } catch {
     return null;
+  }
+}
+
+// Setup automatic token refresh
+let refreshInterval: NodeJS.Timeout | null = null;
+
+export function startTokenRefresh(intervalMs = 5 * 60 * 1000): void {
+  // Refresh every 5 minutes by default
+  stopTokenRefresh();
+  
+  refreshInterval = setInterval(async () => {
+    const token = getToken();
+    if (token && isTokenExpired(token, 120)) { // Refresh if expiring within 2 minutes
+      await refreshAccessToken();
+    }
+  }, intervalMs);
+}
+
+export function stopTokenRefresh(): void {
+  if (refreshInterval) {
+    clearInterval(refreshInterval);
+    refreshInterval = null;
   }
 }
