@@ -114,6 +114,18 @@ export interface ValidationRule {
 // Conference types
 export type ConferenceStatus = 'pending' | 'in_progress' | 'completed' | 'divergent';
 
+export type EmailStatus = 'pending' | 'sent' | 'failed';
+
+export interface EmailHistoryEntry {
+  id: string;
+  type: 'conference_link' | 'reminder' | 'completion';
+  to: string;
+  subject: string;
+  status: EmailStatus;
+  sentAt: Date;
+  error?: string;
+}
+
 export interface Conference {
   id: string;
   name: string;
@@ -127,6 +139,7 @@ export interface Conference {
   stores: Store[];
   expectedInputValues: Record<string, ExpectedInputValue>;
   items: ConferenceItem[];
+  emailHistory: EmailHistoryEntry[];
   createdAt: Date;
   updatedAt: Date;
   createdBy: string;
