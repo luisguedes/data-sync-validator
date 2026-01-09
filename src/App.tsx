@@ -18,6 +18,7 @@ import Conferences from "@/pages/Conferences";
 import ConferenceExecution from "@/pages/ConferenceExecution";
 import ClientConference from "@/pages/ClientConference";
 import Settings from "@/pages/Settings";
+import Reports from "@/pages/Reports";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -125,6 +126,18 @@ const App = () => (
                   <ProtectedRoute>
                     <AppLayout>
                       <Settings />
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* Reports route */}
+              <Route
+                path="/reports"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <Reports />
                     </AppLayout>
                   </ProtectedRoute>
                 }
