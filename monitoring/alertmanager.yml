@@ -1,9 +1,17 @@
-# Alertmanager Configuration with Slack Notifications
+# Alertmanager Configuration with Slack + Email Notifications
 
 global:
   resolve_timeout: 5m
-  # Slack API URL (configure via environment variable or directly)
+  
+  # Slack API URL
   slack_api_url: '${SLACK_WEBHOOK_URL}'
+  
+  # SMTP Configuration for Email
+  smtp_smarthost: '${SMTP_HOST}:${SMTP_PORT}'
+  smtp_from: '${SMTP_FROM}'
+  smtp_auth_username: '${SMTP_USER}'
+  smtp_auth_password: '${SMTP_PASS}'
+  smtp_require_tls: false
 
 # Route configuration
 route:
@@ -14,15 +22,15 @@ route:
   receiver: 'slack-notifications'
   
   routes:
-    # Critical alerts - immediate notification
+    # Critical alerts - Slack + Email immediately
     - match:
         severity: critical
-      receiver: 'slack-critical'
+      receiver: 'critical-multi-channel'
       group_wait: 0s
       repeat_interval: 1h
       continue: true
     
-    # Warning alerts
+    # Warning alerts - Slack only
     - match:
         severity: warning
       receiver: 'slack-warnings'
@@ -30,7 +38,7 @@ route:
 
 # Receivers
 receivers:
-  # Default receiver
+  # Default receiver - Slack
   - name: 'slack-notifications'
     slack_configs:
       - channel: '#monitoring'
@@ -47,13 +55,13 @@ receivers:
         actions:
           - type: button
             text: 'View in Prometheus 📊'
-            url: 'http://localhost:9090/alerts'
+            url: '${PROMETHEUS_URL}/alerts'
           - type: button
             text: 'View in Grafana 📈'
-            url: 'http://localhost:3000/d/email-backend'
+            url: '${GRAFANA_URL}/d/email-backend'
 
-  # Critical alerts - separate channel with more urgency
-  - name: 'slack-critical'
+  # Critical alerts - Slack + Email (Multi-channel)
+  - name: 'critical-multi-channel'
     slack_configs:
       - channel: '#alerts-critical'
         send_resolved: true
@@ -66,15 +74,85 @@ receivers:
           *Started:* {{ .StartsAt.Format "2006-01-02 15:04:05" }}
           {{ end }}
         color: 'danger'
-        actions:
-          - type: button
-            text: 'View in Prometheus 📊'
-            url: 'http://localhost:9090/alerts'
-          - type: button
-            text: 'Runbook 📖'
-            url: 'https://your-runbook-url.com'
+    
+    # Email backup for critical alerts
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        headers:
+          Subject: '🚨 [CRITICAL] {{ .CommonLabels.alertname }} - {{ .Status | toUpper }}'
+        html: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }
+              .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+              .header { padding: 20px; text-align: center; }
+              .header.firing { background: linear-gradient(135deg, #dc3545, #c82333); color: white; }
+              .header.resolved { background: linear-gradient(135deg, #28a745, #218838); color: white; }
+              .content { padding: 20px; }
+              .alert-card { background: #f8f9fa; border-left: 4px solid #dc3545; padding: 15px; margin: 10px 0; border-radius: 0 4px 4px 0; }
+              .alert-card.resolved { border-left-color: #28a745; }
+              .label { font-weight: bold; color: #495057; margin-bottom: 5px; }
+              .value { color: #212529; margin-bottom: 10px; }
+              .footer { padding: 15px 20px; background: #f8f9fa; text-align: center; font-size: 12px; color: #6c757d; }
+              .button { display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; margin: 5px; }
+              .button:hover { background: #0056b3; }
+              .severity { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+              .severity.critical { background: #dc3545; color: white; }
+              .severity.warning { background: #ffc107; color: #212529; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header {{ if eq .Status "firing" }}firing{{ else }}resolved{{ end }}">
+                <h1 style="margin: 0;">
+                  {{ if eq .Status "firing" }}🚨 ALERT FIRING{{ else }}✅ ALERT RESOLVED{{ end }}
+                </h1>
+                <p style="margin: 10px 0 0 0; opacity: 0.9;">{{ .CommonLabels.alertname }}</p>
+              </div>
+              
+              <div class="content">
+                {{ range .Alerts }}
+                <div class="alert-card {{ if eq .Status "resolved" }}resolved{{ end }}">
+                  <div class="label">Summary</div>
+                  <div class="value">{{ .Annotations.summary }}</div>
+                  
+                  <div class="label">Description</div>
+                  <div class="value">{{ .Annotations.description }}</div>
+                  
+                  <div class="label">Severity</div>
+                  <div class="value">
+                    <span class="severity {{ .Labels.severity }}">{{ .Labels.severity | toUpper }}</span>
+                  </div>
+                  
+                  <div class="label">Started At</div>
+                  <div class="value">{{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}</div>
+                  
+                  {{ if eq .Status "resolved" }}
+                  <div class="label">Resolved At</div>
+                  <div class="value">{{ .EndsAt.Format "2006-01-02 15:04:05 MST" }}</div>
+                  {{ end }}
+                </div>
+                {{ end }}
+                
+                <div style="text-align: center; margin-top: 20px;">
+                  <a href="${PROMETHEUS_URL}/alerts" class="button">View in Prometheus</a>
+                  <a href="${GRAFANA_URL}/d/email-backend" class="button">View in Grafana</a>
+                </div>
+              </div>
+              
+              <div class="footer">
+                <p>This alert was sent by Alertmanager</p>
+                <p>Sistema de Migração - Monitoring</p>
+              </div>
+            </div>
+          </body>
+          </html>
 
-  # Warning alerts
+  # Warning alerts - Slack only
   - name: 'slack-warnings'
     slack_configs:
       - channel: '#alerts-warnings'
@@ -87,6 +165,14 @@ receivers:
           *Severity:* {{ .Labels.severity }}
           {{ end }}
         color: 'warning'
+
+  # Email only receiver (can be used for specific alerts)
+  - name: 'email-only'
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        headers:
+          Subject: '[{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}'
 
 # Inhibition rules - prevent duplicate notifications
 inhibit_rules:
@@ -104,6 +190,6 @@ inhibit_rules:
       alertname: 'SMTPDisconnected'
     equal: ['job']
 
-# Templates (optional - for custom formatting)
+# Templates
 templates:
   - '/etc/alertmanager/templates/*.tmpl'

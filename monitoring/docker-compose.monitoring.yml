@@ -1,6 +1,6 @@
 version: '3.8'
 
-# Monitoring Stack - Prometheus + Grafana + Slack Notifications
+# Monitoring Stack - Prometheus + Grafana + Slack + Email Notifications
 # Usage: docker-compose -f docker-compose.prod.yml -f monitoring/docker-compose.monitoring.yml up -d
 
 services:
@@ -56,7 +56,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Alertmanager - Alert handling with Slack
+  # Alertmanager - Alert handling with Slack + Email
   alertmanager:
     image: prom/alertmanager:v0.26.0
     container_name: migracao-alertmanager
@@ -68,7 +68,18 @@ services:
       - '--config.file=/etc/alertmanager/alertmanager.yml'
       - '--storage.path=/alertmanager'
     environment:
+      # Slack
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      # Email/SMTP
+      - SMTP_HOST=${SMTP_HOST:-localhost}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASS=${SMTP_PASS:-}
+      - SMTP_FROM=${SMTP_FROM:-alerts@localhost}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-admin@localhost}
+      # URLs
+      - PROMETHEUS_URL=${PROMETHEUS_URL:-http://localhost:9090}
+      - GRAFANA_URL=${GRAFANA_URL:-http://localhost:3000}
     ports:
       - "9093:9093"
     networks:
