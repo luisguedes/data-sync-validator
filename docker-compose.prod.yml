@@ -1,0 +1,62 @@
+version: '3.8'
+
+# Production Docker Compose - Use with: docker-compose -f docker-compose.prod.yml up -d
+
+services:
+  # Frontend - React/Vite with Nginx
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: migracao-frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Mount SSL certificates if using HTTPS
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # Backend - Node.js Email Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: migracao-backend
+    expose:
+      - "3001"
+    env_file:
+      - ./backend/.env
+    networks:
+      - app-network
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  app-network:
+    driver: bridge
