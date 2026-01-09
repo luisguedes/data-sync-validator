@@ -1,5 +1,3 @@
-version: '3.8'
-
 # Production Docker Compose - Use with: docker-compose -f docker-compose.prod.yml up -d
 
 services:
@@ -9,12 +7,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: migracao-frontend
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      # Mount SSL certificates if using HTTPS
-      - ./ssl:/etc/nginx/ssl:ro
+    expose:
+      - "80"
     depends_on:
       backend:
         condition: service_healthy
