@@ -9,30 +9,174 @@ const path = require('path');
 const app = express();
 
 // ============================================
-// API Keys Management
+// JWT Configuration (local, no external dependencies)
+// ============================================
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const JWT_EXPIRY = process.env.JWT_EXPIRY || '24h';
+const USERS_FILE = process.env.USERS_FILE || './users.json';
+
+// Simple JWT implementation (no external dependencies)
+const base64UrlEncode = (str) => {
+  return Buffer.from(str).toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+};
+
+const base64UrlDecode = (str) => {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  return Buffer.from(str, 'base64').toString();
+};
+
+const createJwt = (payload) => {
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
+  
+  // Parse expiry string (e.g., '24h', '7d')
+  let expirySeconds = 24 * 60 * 60; // Default 24h
+  const expiryMatch = JWT_EXPIRY.match(/^(\d+)([hdm])$/);
+  if (expiryMatch) {
+    const value = parseInt(expiryMatch[1]);
+    const unit = expiryMatch[2];
+    if (unit === 'h') expirySeconds = value * 60 * 60;
+    else if (unit === 'd') expirySeconds = value * 24 * 60 * 60;
+    else if (unit === 'm') expirySeconds = value * 60;
+  }
+  
+  const fullPayload = {
+    ...payload,
+    iat: now,
+    exp: now + expirySeconds,
+  };
+  
+  const headerB64 = base64UrlEncode(JSON.stringify(header));
+  const payloadB64 = base64UrlEncode(JSON.stringify(fullPayload));
+  const signature = crypto
+    .createHmac('sha256', JWT_SECRET)
+    .update(`${headerB64}.${payloadB64}`)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=/g, '');
+  
+  return `${headerB64}.${payloadB64}.${signature}`;
+};
+
+const verifyJwt = (token) => {
+  try {
+    const [headerB64, payloadB64, signature] = token.split('.');
+    
+    const expectedSignature = crypto
+      .createHmac('sha256', JWT_SECRET)
+      .update(`${headerB64}.${payloadB64}`)
+      .digest('base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=/g, '');
+    
+    if (signature !== expectedSignature) {
+      return null;
+    }
+    
+    const payload = JSON.parse(base64UrlDecode(payloadB64));
+    
+    // Check expiration
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+    
+    return payload;
+  } catch {
+    return null;
+  }
+};
+
+// ============================================
+// User Management
+// ============================================
+let users = [];
+
+const loadUsers = () => {
+  try {
+    if (fs.existsSync(USERS_FILE)) {
+      const data = fs.readFileSync(USERS_FILE, 'utf8');
+      users = JSON.parse(data);
+      console.log(`👤 Loaded ${users.length} user(s) from file`);
+      return;
+    }
+    
+    // Create default admin user if no users exist
+    const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || 'admin123';
+    const salt = crypto.randomBytes(16).toString('hex');
+    const hash = crypto.pbkdf2Sync(defaultPassword, salt, 100000, 64, 'sha512').toString('hex');
+    
+    users = [{
+      id: crypto.randomUUID(),
+      email: process.env.DEFAULT_ADMIN_EMAIL || 'admin@local.dev',
+      name: 'Administrador',
+      role: 'admin',
+      passwordHash: hash,
+      passwordSalt: salt,
+      active: true,
+      createdAt: new Date().toISOString(),
+    }];
+    
+    saveUsers();
+    console.log(`👤 Created default admin user: ${users[0].email}`);
+  } catch (error) {
+    console.error('❌ Error loading users:', error.message);
+  }
+};
+
+const saveUsers = () => {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  } catch (error) {
+    console.error('❌ Error saving users:', error.message);
+  }
+};
+
+const hashPassword = (password, salt) => {
+  return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+};
+
+const verifyPassword = (password, hash, salt) => {
+  const hashVerify = hashPassword(password, salt);
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hashVerify));
+};
+
+loadUsers();
+
+// ============================================
+// API Keys Management (kept for backward compatibility)
 // ============================================
 const API_KEYS_FILE = process.env.API_KEYS_FILE || './api-keys.json';
 const API_KEY_HEADER = 'x-api-key';
 
-// Permission levels
 const PERMISSIONS = {
-  READ: 'read',      // Can only read (health checks, test connections)
-  FULL: 'full',      // Full access (read + send emails)
-  ADMIN: 'admin',    // Admin access (full + manage keys)
+  READ: 'read',
+  FULL: 'full',
+  ADMIN: 'admin',
 };
 
-// Endpoint permission requirements
 const ENDPOINT_PERMISSIONS = {
   // Public endpoints (no auth required)
   'GET:/api/health': null,
   'GET:/api/health/live': null,
   'GET:/metrics': null,
   
+  // Auth endpoints (no auth required)
+  'POST:/api/auth/login': null,
+  'POST:/api/auth/register': null,
+  
   // Read-only endpoints
   'GET:/api/health/detailed': PERMISSIONS.READ,
   'GET:/api/health/ready': PERMISSIONS.READ,
   'GET:/api/test-smtp': PERMISSIONS.READ,
   'GET:/api/keys': PERMISSIONS.READ,
+  'GET:/api/auth/me': PERMISSIONS.READ,
+  'GET:/api/users': PERMISSIONS.READ,
   
   // Full access endpoints
   'POST:/api/send-email': PERMISSIONS.FULL,
@@ -41,14 +185,15 @@ const ENDPOINT_PERMISSIONS = {
   'POST:/api/keys': PERMISSIONS.ADMIN,
   'DELETE:/api/keys': PERMISSIONS.ADMIN,
   'PUT:/api/keys': PERMISSIONS.ADMIN,
+  'POST:/api/users': PERMISSIONS.ADMIN,
+  'PUT:/api/users': PERMISSIONS.ADMIN,
+  'DELETE:/api/users': PERMISSIONS.ADMIN,
 };
 
-// Load API keys from file or environment
 let apiKeys = [];
 
 const loadApiKeys = () => {
   try {
-    // First try to load from file
     if (fs.existsSync(API_KEYS_FILE)) {
       const data = fs.readFileSync(API_KEYS_FILE, 'utf8');
       apiKeys = JSON.parse(data);
@@ -56,7 +201,6 @@ const loadApiKeys = () => {
       return;
     }
     
-    // Fallback to environment variables
     const envKeys = process.env.API_KEYS;
     if (envKeys) {
       apiKeys = JSON.parse(envKeys);
@@ -64,7 +208,6 @@ const loadApiKeys = () => {
       return;
     }
     
-    // Legacy single key support
     if (process.env.API_KEY) {
       apiKeys = [{
         id: 'legacy-key',
@@ -79,7 +222,7 @@ const loadApiKeys = () => {
       return;
     }
     
-    console.warn('⚠️ No API keys configured - running in development mode');
+    console.log('ℹ️ No API keys configured - JWT authentication is primary');
   } catch (error) {
     console.error('❌ Error loading API keys:', error.message);
   }
@@ -87,7 +230,6 @@ const loadApiKeys = () => {
 
 const saveApiKeys = () => {
   try {
-    // Don't save keys from environment
     if (process.env.API_KEYS || process.env.API_KEY) {
       return;
     }
@@ -99,9 +241,8 @@ const saveApiKeys = () => {
 
 loadApiKeys();
 
-// Check if permission level allows access
 const hasPermission = (keyPermission, requiredPermission) => {
-  if (!requiredPermission) return true; // Public endpoint
+  if (!requiredPermission) return true;
   
   const hierarchy = [PERMISSIONS.READ, PERMISSIONS.FULL, PERMISSIONS.ADMIN];
   const keyLevel = hierarchy.indexOf(keyPermission);
@@ -110,101 +251,133 @@ const hasPermission = (keyPermission, requiredPermission) => {
   return keyLevel >= requiredLevel;
 };
 
-// API Key validation middleware
-const authenticateApiKey = (req, res, next) => {
+// ============================================
+// Authentication Middleware (JWT + API Key)
+// ============================================
+const authenticate = (req, res, next) => {
   const endpoint = `${req.method}:${req.path}`;
   const requiredPermission = ENDPOINT_PERMISSIONS[endpoint];
   
   // Check for public endpoints
-  if (requiredPermission === null || requiredPermission === undefined) {
-    // Check if it's a known public endpoint pattern
-    if (req.path.startsWith('/api/health') && req.method === 'GET' && !req.path.includes('detailed') && !req.path.includes('ready')) {
-      return next();
-    }
-    if (req.path === '/metrics' && req.method === 'GET') {
-      return next();
-    }
+  if (requiredPermission === null) {
+    return next();
   }
   
-  // Get required permission for the endpoint
-  const permission = ENDPOINT_PERMISSIONS[endpoint];
+  // Check for public endpoint patterns
+  if (req.path.startsWith('/api/health') && req.method === 'GET' && 
+      !req.path.includes('detailed') && !req.path.includes('ready')) {
+    return next();
+  }
+  if (req.path === '/metrics' && req.method === 'GET') {
+    return next();
+  }
+  if ((req.path === '/api/auth/login' || req.path === '/api/auth/register') && req.method === 'POST') {
+    return next();
+  }
   
-  // If no permission defined, default to FULL for POST/DELETE/PUT, READ for GET
-  const effectivePermission = permission !== undefined ? permission : 
+  const effectivePermission = requiredPermission !== undefined ? requiredPermission : 
     (req.method === 'GET' ? PERMISSIONS.READ : PERMISSIONS.FULL);
   
-  // If null, it's public
   if (effectivePermission === null) {
     return next();
   }
 
-  // Skip auth if no keys configured (development mode)
-  if (apiKeys.length === 0) {
-    console.warn('⚠️ No API keys configured - allowing request in dev mode');
-    req.apiKeyInfo = { permission: PERMISSIONS.ADMIN, name: 'Dev Mode' };
-    return next();
-  }
-
-  const providedKey = req.headers[API_KEY_HEADER];
-
-  if (!providedKey) {
+  // Try JWT authentication first (Authorization: Bearer <token>)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    const payload = verifyJwt(token);
+    
+    if (payload) {
+      // Map user role to permission level
+      const roleToPermission = {
+        'admin': PERMISSIONS.ADMIN,
+        'colaborador': PERMISSIONS.FULL,
+        'viewer': PERMISSIONS.READ,
+      };
+      
+      const userPermission = roleToPermission[payload.role] || PERMISSIONS.READ;
+      
+      if (!hasPermission(userPermission, effectivePermission)) {
+        metrics.requests.unauthorized++;
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden',
+          message: `Insufficient permissions. Required: ${effectivePermission}, Your level: ${userPermission}`,
+        });
+      }
+      
+      req.user = payload;
+      req.authMethod = 'jwt';
+      return next();
+    }
+    
+    // Invalid token
     metrics.requests.unauthorized++;
     return res.status(401).json({
       success: false,
       error: 'Unauthorized',
-      message: 'API key is required. Provide it in the x-api-key header.',
+      message: 'Invalid or expired token',
     });
   }
 
-  // Find matching key using timing-safe comparison
-  const keyInfo = apiKeys.find(k => {
-    try {
-      return crypto.timingSafeEqual(
-        Buffer.from(providedKey),
-        Buffer.from(k.key)
-      );
-    } catch {
-      return false;
+  // Try API Key authentication (x-api-key header)
+  const providedKey = req.headers[API_KEY_HEADER];
+  
+  if (providedKey) {
+    const keyInfo = apiKeys.find(k => {
+      try {
+        return crypto.timingSafeEqual(
+          Buffer.from(providedKey),
+          Buffer.from(k.key)
+        );
+      } catch {
+        return false;
+      }
+    });
+
+    if (!keyInfo) {
+      metrics.requests.unauthorized++;
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden',
+        message: 'Invalid API key.',
+      });
     }
+
+    if (keyInfo.active === false) {
+      metrics.requests.unauthorized++;
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden',
+        message: 'API key is disabled.',
+      });
+    }
+
+    if (!hasPermission(keyInfo.permission, effectivePermission)) {
+      metrics.requests.unauthorized++;
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden',
+        message: `Insufficient permissions. Required: ${effectivePermission}, Your level: ${keyInfo.permission}`,
+      });
+    }
+
+    keyInfo.lastUsedAt = new Date().toISOString();
+    keyInfo.usageCount = (keyInfo.usageCount || 0) + 1;
+    
+    req.apiKeyInfo = keyInfo;
+    req.authMethod = 'apikey';
+    return next();
+  }
+
+  // No authentication provided
+  metrics.requests.unauthorized++;
+  return res.status(401).json({
+    success: false,
+    error: 'Unauthorized',
+    message: 'Authentication required. Use Bearer token or API key.',
   });
-
-  if (!keyInfo) {
-    metrics.requests.unauthorized++;
-    return res.status(403).json({
-      success: false,
-      error: 'Forbidden',
-      message: 'Invalid API key.',
-    });
-  }
-
-  // Check if key is active
-  if (keyInfo.active === false) {
-    metrics.requests.unauthorized++;
-    return res.status(403).json({
-      success: false,
-      error: 'Forbidden',
-      message: 'API key is disabled.',
-    });
-  }
-
-  // Check permission level
-  if (!hasPermission(keyInfo.permission, effectivePermission)) {
-    metrics.requests.unauthorized++;
-    return res.status(403).json({
-      success: false,
-      error: 'Forbidden',
-      message: `Insufficient permissions. Required: ${effectivePermission}, Your level: ${keyInfo.permission}`,
-    });
-  }
-
-  // Update usage stats
-  keyInfo.lastUsedAt = new Date().toISOString();
-  keyInfo.usageCount = (keyInfo.usageCount || 0) + 1;
-  
-  // Attach key info to request
-  req.apiKeyInfo = keyInfo;
-  
-  next();
 };
 
 // ============================================
@@ -219,7 +392,6 @@ const metrics = {
   keyUsage: {},
 };
 
-// Middleware to track request metrics
 app.use((req, res, next) => {
   const start = Date.now();
   metrics.requests.total++;
@@ -235,7 +407,6 @@ app.use((req, res, next) => {
       metrics.requests.success++;
     }
     
-    // Track per-key usage
     if (req.apiKeyInfo) {
       const keyId = req.apiKeyInfo.id || 'unknown';
       if (!metrics.keyUsage[keyId]) {
@@ -261,8 +432,8 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
-// Apply API key authentication to all routes
-app.use(authenticateApiKey);
+// Apply authentication to all routes
+app.use(authenticate);
 
 // ============================================
 // Rate Limiting
@@ -351,6 +522,339 @@ verifySMTP();
 setInterval(verifySMTP, 60000);
 
 // ============================================
+// Authentication Endpoints
+// ============================================
+
+// Login
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email e senha são obrigatórios',
+    });
+  }
+  
+  const user = users.find(u => u.email.toLowerCase() === email.toLowerCase());
+  
+  if (!user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Email ou senha inválidos',
+    });
+  }
+  
+  if (!user.active) {
+    return res.status(401).json({
+      success: false,
+      message: 'Usuário desativado',
+    });
+  }
+  
+  if (!verifyPassword(password, user.passwordHash, user.passwordSalt)) {
+    return res.status(401).json({
+      success: false,
+      message: 'Email ou senha inválidos',
+    });
+  }
+  
+  // Update last login
+  user.lastLoginAt = new Date().toISOString();
+  saveUsers();
+  
+  const token = createJwt({
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    role: user.role,
+  });
+  
+  console.log(`🔓 User logged in: ${user.email}`);
+  
+  res.json({
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+    },
+  });
+});
+
+// Register (can be disabled in production)
+app.post('/api/auth/register', (req, res) => {
+  // Check if registration is enabled
+  if (process.env.DISABLE_REGISTRATION === 'true') {
+    return res.status(403).json({
+      success: false,
+      message: 'Registro desabilitado. Contate o administrador.',
+    });
+  }
+  
+  const { email, password, name } = req.body;
+  
+  if (!email || !password || !name) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email, senha e nome são obrigatórios',
+    });
+  }
+  
+  // Email validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email inválido',
+    });
+  }
+  
+  // Password strength
+  if (password.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'A senha deve ter pelo menos 6 caracteres',
+    });
+  }
+  
+  // Check if user exists
+  if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+    return res.status(409).json({
+      success: false,
+      message: 'Este email já está cadastrado',
+    });
+  }
+  
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPassword(password, salt);
+  
+  const newUser = {
+    id: crypto.randomUUID(),
+    email: email.toLowerCase(),
+    name: name.trim(),
+    role: 'colaborador', // New users are always colaborador
+    passwordHash: hash,
+    passwordSalt: salt,
+    active: true,
+    createdAt: new Date().toISOString(),
+  };
+  
+  users.push(newUser);
+  saveUsers();
+  
+  const token = createJwt({
+    sub: newUser.id,
+    email: newUser.email,
+    name: newUser.name,
+    role: newUser.role,
+  });
+  
+  console.log(`👤 New user registered: ${newUser.email}`);
+  
+  res.status(201).json({
+    success: true,
+    token,
+    user: {
+      id: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role,
+    },
+  });
+});
+
+// Get current user
+app.get('/api/auth/me', (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Not authenticated',
+    });
+  }
+  
+  const user = users.find(u => u.id === req.user.sub);
+  
+  if (!user) {
+    return res.status(404).json({
+      success: false,
+      message: 'User not found',
+    });
+  }
+  
+  res.json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      createdAt: user.createdAt,
+      lastLoginAt: user.lastLoginAt,
+    },
+  });
+});
+
+// ============================================
+// User Management Endpoints (Admin only)
+// ============================================
+
+// List users
+app.get('/api/users', (req, res) => {
+  const userList = users.map(u => ({
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    active: u.active,
+    createdAt: u.createdAt,
+    lastLoginAt: u.lastLoginAt,
+  }));
+  
+  res.json({
+    success: true,
+    users: userList,
+  });
+});
+
+// Create user (admin only)
+app.post('/api/users', (req, res) => {
+  const { email, password, name, role = 'colaborador' } = req.body;
+  
+  if (!email || !password || !name) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email, senha e nome são obrigatórios',
+    });
+  }
+  
+  if (!['admin', 'colaborador', 'viewer'].includes(role)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Role inválido. Use: admin, colaborador ou viewer',
+    });
+  }
+  
+  if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
+    return res.status(409).json({
+      success: false,
+      message: 'Este email já está cadastrado',
+    });
+  }
+  
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = hashPassword(password, salt);
+  
+  const newUser = {
+    id: crypto.randomUUID(),
+    email: email.toLowerCase(),
+    name: name.trim(),
+    role,
+    passwordHash: hash,
+    passwordSalt: salt,
+    active: true,
+    createdAt: new Date().toISOString(),
+    createdBy: req.user?.email || 'system',
+  };
+  
+  users.push(newUser);
+  saveUsers();
+  
+  console.log(`👤 User created by ${req.user?.email}: ${newUser.email} (${role})`);
+  
+  res.status(201).json({
+    success: true,
+    user: {
+      id: newUser.id,
+      email: newUser.email,
+      name: newUser.name,
+      role: newUser.role,
+    },
+  });
+});
+
+// Update user (admin only)
+app.put('/api/users/:id', (req, res) => {
+  const { id } = req.params;
+  const { name, role, active, password } = req.body;
+  
+  const userIndex = users.findIndex(u => u.id === id);
+  
+  if (userIndex === -1) {
+    return res.status(404).json({
+      success: false,
+      message: 'Usuário não encontrado',
+    });
+  }
+  
+  // Prevent modifying own admin status
+  if (req.user?.sub === id && (role !== undefined || active !== undefined)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Você não pode modificar seu próprio status ou role',
+    });
+  }
+  
+  if (name) users[userIndex].name = name.trim();
+  if (role && ['admin', 'colaborador', 'viewer'].includes(role)) {
+    users[userIndex].role = role;
+  }
+  if (active !== undefined) users[userIndex].active = active;
+  if (password && password.length >= 6) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    users[userIndex].passwordHash = hashPassword(password, salt);
+    users[userIndex].passwordSalt = salt;
+  }
+  
+  users[userIndex].updatedAt = new Date().toISOString();
+  saveUsers();
+  
+  res.json({
+    success: true,
+    user: {
+      id: users[userIndex].id,
+      email: users[userIndex].email,
+      name: users[userIndex].name,
+      role: users[userIndex].role,
+      active: users[userIndex].active,
+    },
+  });
+});
+
+// Delete user (admin only)
+app.delete('/api/users/:id', (req, res) => {
+  const { id } = req.params;
+  
+  if (req.user?.sub === id) {
+    return res.status(400).json({
+      success: false,
+      message: 'Você não pode deletar sua própria conta',
+    });
+  }
+  
+  const userIndex = users.findIndex(u => u.id === id);
+  
+  if (userIndex === -1) {
+    return res.status(404).json({
+      success: false,
+      message: 'Usuário não encontrado',
+    });
+  }
+  
+  const deletedUser = users.splice(userIndex, 1)[0];
+  saveUsers();
+  
+  console.log(`🗑️ User deleted: ${deletedUser.email}`);
+  
+  res.json({
+    success: true,
+    message: 'Usuário deletado',
+  });
+});
+
+// ============================================
 // Health Check Endpoints (Public)
 // ============================================
 
@@ -360,7 +864,8 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
     uptime: Math.floor((Date.now() - metrics.uptime) / 1000),
-    authEnabled: apiKeys.length > 0,
+    authMethods: ['jwt', 'apikey'],
+    usersCount: users.length,
   });
 });
 
@@ -375,9 +880,8 @@ app.get('/api/health/detailed', async (req, res) => {
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
     uptime: Math.floor((Date.now() - metrics.uptime) / 1000),
-    authEnabled: apiKeys.length > 0,
-    apiKeyCount: apiKeys.length,
-    yourPermission: req.apiKeyInfo?.permission || 'none',
+    authMethod: req.authMethod || 'none',
+    yourPermission: req.user ? (req.user.role === 'admin' ? 'admin' : req.user.role === 'colaborador' ? 'full' : 'read') : (req.apiKeyInfo?.permission || 'none'),
     checks: {
       smtp: {
         status: smtpHealthy ? 'pass' : 'fail',
@@ -448,6 +952,10 @@ email_backend_emails_total{status="failed"} ${metrics.emails.failed}
 # TYPE email_backend_smtp_status gauge
 email_backend_smtp_status ${metrics.smtp.status === 'connected' ? 1 : 0}
 
+# HELP email_backend_users_total Number of registered users
+# TYPE email_backend_users_total gauge
+email_backend_users_total ${users.length}
+
 # HELP email_backend_api_keys_total Number of configured API keys
 # TYPE email_backend_api_keys_total gauge
 email_backend_api_keys_total ${apiKeys.length}
@@ -478,12 +986,11 @@ ${keyMetrics}
 });
 
 // ============================================
-// API Key Management Endpoints
+// API Key Management Endpoints (backward compatibility)
 // ============================================
 
-// List API keys (read permission - shows limited info)
 app.get('/api/keys', (req, res) => {
-  const isAdmin = req.apiKeyInfo?.permission === PERMISSIONS.ADMIN;
+  const isAdmin = req.user?.role === 'admin' || req.apiKeyInfo?.permission === PERMISSIONS.ADMIN;
   
   const keys = apiKeys.map(k => ({
     id: k.id,
@@ -493,18 +1000,16 @@ app.get('/api/keys', (req, res) => {
     createdAt: k.createdAt,
     lastUsedAt: k.lastUsedAt,
     usageCount: k.usageCount || 0,
-    // Only show key prefix for admin
     keyPreview: isAdmin ? `${k.key.substring(0, 8)}...${k.key.substring(k.key.length - 4)}` : undefined,
   }));
   
   res.json({
     success: true,
     keys,
-    yourPermission: req.apiKeyInfo?.permission,
+    yourPermission: req.user?.role || req.apiKeyInfo?.permission,
   });
 });
 
-// Create new API key (admin only)
 app.post('/api/keys', (req, res) => {
   const { name, permission = PERMISSIONS.READ } = req.body;
   
@@ -529,7 +1034,7 @@ app.post('/api/keys', (req, res) => {
     permission,
     active: true,
     createdAt: new Date().toISOString(),
-    createdBy: req.apiKeyInfo?.name || 'Unknown',
+    createdBy: req.user?.email || req.apiKeyInfo?.name || 'Unknown',
     lastUsedAt: null,
     usageCount: 0,
   };
@@ -545,7 +1050,7 @@ app.post('/api/keys', (req, res) => {
     key: {
       id: newKey.id,
       name: newKey.name,
-      key: newKey.key, // Only shown once!
+      key: newKey.key,
       permission: newKey.permission,
       createdAt: newKey.createdAt,
     },
@@ -553,7 +1058,6 @@ app.post('/api/keys', (req, res) => {
   });
 });
 
-// Update API key (admin only)
 app.put('/api/keys/:id', (req, res) => {
   const { id } = req.params;
   const { name, permission, active } = req.body;
@@ -567,7 +1071,6 @@ app.put('/api/keys/:id', (req, res) => {
     });
   }
   
-  // Don't allow modifying own key's permission/active status
   if (req.apiKeyInfo?.id === id && (permission !== undefined || active !== undefined)) {
     return res.status(400).json({
       success: false,
@@ -596,11 +1099,9 @@ app.put('/api/keys/:id', (req, res) => {
   });
 });
 
-// Delete API key (admin only)
 app.delete('/api/keys/:id', (req, res) => {
   const { id } = req.params;
   
-  // Don't allow deleting own key
   if (req.apiKeyInfo?.id === id) {
     return res.status(400).json({
       success: false,
@@ -628,7 +1129,6 @@ app.delete('/api/keys/:id', (req, res) => {
   });
 });
 
-// Regenerate API key (admin only)
 app.post('/api/keys/:id/regenerate', (req, res) => {
   const { id } = req.params;
   
@@ -654,7 +1154,7 @@ app.post('/api/keys/:id/regenerate', (req, res) => {
     key: {
       id: apiKeys[keyIndex].id,
       name: apiKeys[keyIndex].name,
-      key: newKeyValue, // Only shown once!
+      key: newKeyValue,
     },
     warning: 'A chave anterior foi invalidada. Esta nova chave só será exibida uma vez!',
   });
@@ -712,7 +1212,8 @@ app.post('/api/send-email', async (req, res) => {
     });
 
     metrics.emails.sent++;
-    console.log(`📧 Email enviado por ${req.apiKeyInfo?.name || 'Unknown'}:`, info.messageId, 'para:', to);
+    const sender = req.user?.email || req.apiKeyInfo?.name || 'Unknown';
+    console.log(`📧 Email enviado por ${sender}:`, info.messageId, 'para:', to);
     
     res.json({ 
       success: true, 
@@ -735,6 +1236,7 @@ app.post('/api/send-email', async (req, res) => {
 const shutdown = (signal) => {
   console.log(`🛑 ${signal} received, saving data and closing connections...`);
   saveApiKeys();
+  saveUsers();
   transporter.close();
   process.exit(0);
 };
@@ -748,7 +1250,9 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Backend de email rodando na porta ${PORT}`);
-  console.log(`🔐 API Keys configuradas: ${apiKeys.length}`);
+  console.log(`🔐 Autenticação: JWT + API Keys`);
+  console.log(`👤 Usuários cadastrados: ${users.length}`);
+  console.log(`🔑 API Keys configuradas: ${apiKeys.length}`);
   console.log(`📊 Métricas Prometheus: http://localhost:${PORT}/metrics`);
   console.log(`💚 Health check: http://localhost:${PORT}/api/health/detailed`);
 });
