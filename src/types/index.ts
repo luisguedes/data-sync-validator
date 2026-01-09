@@ -28,6 +28,7 @@ export interface DatabaseConfig {
   database: string;
   username: string;
   password: string;
+  createBackup?: boolean;
 }
 
 export interface SmtpConfig {
