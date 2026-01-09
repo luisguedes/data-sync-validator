@@ -63,6 +63,8 @@ export default function Setup() {
     companyName: '',
     theme: 'system',
     timezone: 'America/Sao_Paulo',
+    backendUrl: 'http://localhost:3001',
+    emailNotifications: true,
   });
 
   const handleTestDatabase = async () => {
@@ -310,32 +312,64 @@ export default function Setup() {
                 placeholder="Minha Empresa"
               />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="pref-theme">Tema Padrão</Label>
-              <select
-                id="pref-theme"
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                value={prefsConfig.theme}
-                onChange={(e) => setPrefsConfig({ ...prefsConfig, theme: e.target.value as 'light' | 'dark' | 'system' })}
-              >
-                <option value="system">Sistema</option>
-                <option value="light">Claro</option>
-                <option value="dark">Escuro</option>
-              </select>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="pref-theme">Tema Padrão</Label>
+                <select
+                  id="pref-theme"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  value={prefsConfig.theme}
+                  onChange={(e) => setPrefsConfig({ ...prefsConfig, theme: e.target.value as 'light' | 'dark' | 'system' })}
+                >
+                  <option value="system">Sistema</option>
+                  <option value="light">Claro</option>
+                  <option value="dark">Escuro</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="pref-timezone">Fuso Horário</Label>
+                <select
+                  id="pref-timezone"
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  value={prefsConfig.timezone}
+                  onChange={(e) => setPrefsConfig({ ...prefsConfig, timezone: e.target.value })}
+                >
+                  <option value="America/Sao_Paulo">Brasília (GMT-3)</option>
+                  <option value="America/Manaus">Manaus (GMT-4)</option>
+                  <option value="America/Bahia">Bahia (GMT-3)</option>
+                  <option value="America/Fortaleza">Fortaleza (GMT-3)</option>
+                </select>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="pref-timezone">Fuso Horário</Label>
-              <select
-                id="pref-timezone"
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-base ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                value={prefsConfig.timezone}
-                onChange={(e) => setPrefsConfig({ ...prefsConfig, timezone: e.target.value })}
-              >
-                <option value="America/Sao_Paulo">Brasília (GMT-3)</option>
-                <option value="America/Manaus">Manaus (GMT-4)</option>
-                <option value="America/Bahia">Bahia (GMT-3)</option>
-                <option value="America/Fortaleza">Fortaleza (GMT-3)</option>
-              </select>
+            
+            <div className="pt-4 border-t">
+              <h4 className="font-medium mb-3">Backend Local (Emails)</h4>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="pref-backend">URL do Backend</Label>
+                  <Input
+                    id="pref-backend"
+                    value={prefsConfig.backendUrl || ''}
+                    onChange={(e) => setPrefsConfig({ ...prefsConfig, backendUrl: e.target.value })}
+                    placeholder="http://localhost:3001"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Endpoint do servidor Node.js para envio de emails
+                  </p>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="pref-email-notifications"
+                    checked={prefsConfig.emailNotifications ?? true}
+                    onChange={(e) => setPrefsConfig({ ...prefsConfig, emailNotifications: e.target.checked })}
+                    className="h-4 w-4 rounded border-input"
+                  />
+                  <Label htmlFor="pref-email-notifications" className="text-sm font-normal">
+                    Ativar notificações por email ao criar conferências
+                  </Label>
+                </div>
+              </div>
             </div>
           </div>
         );

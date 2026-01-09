@@ -40,6 +40,7 @@ const mainItems = [
   { title: 'Conferências', url: '/conferences', icon: ClipboardCheck },
   { title: 'Conexões', url: '/connections', icon: Database },
   { title: 'Templates', url: '/templates', icon: FileText },
+  { title: 'Configurações', url: '/settings', icon: Settings },
 ];
 
 const adminItems = [
@@ -47,7 +48,6 @@ const adminItems = [
   { title: 'Layout Builder', url: '/admin/layout-builder', icon: LayoutGrid },
   { title: 'Query Builder', url: '/admin/query-builder', icon: Code2 },
   { title: 'Integrações', url: '/admin/integrations', icon: Puzzle },
-  { title: 'Configurações', url: '/admin/settings', icon: Settings },
 ];
 
 export function AppSidebar() {

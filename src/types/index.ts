@@ -44,6 +44,8 @@ export interface AppPreferences {
   logoUrl?: string;
   theme: 'light' | 'dark' | 'system';
   timezone: string;
+  backendUrl?: string;
+  emailNotifications?: boolean;
 }
 
 // Database Connection types

@@ -17,6 +17,7 @@ import Templates from "@/pages/Templates";
 import Conferences from "@/pages/Conferences";
 import ConferenceExecution from "@/pages/ConferenceExecution";
 import ClientConference from "@/pages/ClientConference";
+import Settings from "@/pages/Settings";
 import NotFound from "@/pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -112,6 +113,18 @@ const App = () => (
                   <ProtectedRoute>
                     <AppLayout>
                       <Dashboard /> {/* Placeholder - will be replaced */}
+                    </AppLayout>
+                  </ProtectedRoute>
+                }
+              />
+
+              {/* Settings route */}
+              <Route
+                path="/settings"
+                element={
+                  <ProtectedRoute>
+                    <AppLayout>
+                      <Settings />
                     </AppLayout>
                   </ProtectedRoute>
                 }
