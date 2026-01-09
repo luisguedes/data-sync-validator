@@ -9,7 +9,8 @@ import {
   LayoutGrid,
   Code2,
   LogOut,
-  ChevronDown
+  ChevronDown,
+  BarChart3
 } from 'lucide-react';
 import { NavLink } from '@/components/NavLink';
 import { useLocation } from 'react-router-dom';
@@ -40,6 +41,7 @@ const mainItems = [
   { title: 'Conferências', url: '/conferences', icon: ClipboardCheck },
   { title: 'Conexões', url: '/connections', icon: Database },
   { title: 'Templates', url: '/templates', icon: FileText },
+  { title: 'Relatórios', url: '/reports', icon: BarChart3 },
   { title: 'Configurações', url: '/settings', icon: Settings },
 ];
 
