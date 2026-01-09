@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { 
   Plus, Search, Filter, Clock, CheckCircle2, AlertTriangle,
-  ClipboardCheck, Link as LinkIcon, Eye, MoreHorizontal, Trash2, Edit
+  ClipboardCheck, Link as LinkIcon, Eye, MoreHorizontal, Trash2, Edit, Mail
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
@@ -17,6 +17,7 @@ import { useEmailService } from '@/hooks/useEmailService';
 import { ConferenceFormModal, ConferenceFormData } from '@/components/conferences/ConferenceFormModal';
 import { ConferenceLinkModal } from '@/components/conferences/ConferenceLinkModal';
 import { DeleteConferenceDialog } from '@/components/conferences/DeleteConferenceDialog';
+import { EmailHistoryModal } from '@/components/conferences/EmailHistoryModal';
 import { toast } from 'sonner';
 import type { ConferenceStatus, Conference } from '@/types';
 
@@ -29,7 +30,7 @@ const statusConfig = {
 
 export default function Conferences() {
   const navigate = useNavigate();
-  const { conferences, searchTerm, setSearchTerm, statusFilter, setStatusFilter, createConference, deleteConference, copyLink, regenerateLink, isLoading, getConference } = useConferences();
+  const { conferences, searchTerm, setSearchTerm, statusFilter, setStatusFilter, createConference, deleteConference, copyLink, regenerateLink, isLoading, getConference, addEmailToHistory } = useConferences();
   const { allTemplates: templates } = useTemplates();
   const { allConnections: connections } = useConnections();
   const { sendConferenceNotification, sendNewLinkNotification, isEmailEnabled } = useEmailService();
@@ -37,6 +38,7 @@ export default function Conferences() {
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [isLinkModalOpen, setIsLinkModalOpen] = useState(false);
+  const [isEmailHistoryOpen, setIsEmailHistoryOpen] = useState(false);
   const [selectedConference, setSelectedConference] = useState<Conference | null>(null);
   const [createdConference, setCreatedConference] = useState<Conference | null>(null);
 
@@ -55,6 +57,17 @@ export default function Conferences() {
     // Send email automatically if enabled
     if (isEmailEnabled()) {
       const emailResult = await sendConferenceNotification(newConference);
+      
+      // Record email in history
+      addEmailToHistory(newConference.id, {
+        type: 'conference_link',
+        to: newConference.clientEmail,
+        subject: `Link para Conferência: ${newConference.name}`,
+        status: emailResult.success ? 'sent' : 'failed',
+        sentAt: new Date(),
+        error: emailResult.success ? undefined : emailResult.message,
+      });
+      
       if (emailResult.success) {
         toast.success('Conferência criada e email enviado!');
       } else {
@@ -71,7 +84,24 @@ export default function Conferences() {
   };
 
   const handleResendEmail = async (conference: Conference) => {
-    return await sendNewLinkNotification(conference);
+    const result = await sendNewLinkNotification(conference);
+    
+    // Record email in history
+    addEmailToHistory(conference.id, {
+      type: 'conference_link',
+      to: conference.clientEmail,
+      subject: `Novo Link para Conferência: ${conference.name}`,
+      status: result.success ? 'sent' : 'failed',
+      sentAt: new Date(),
+      error: result.success ? undefined : result.message,
+    });
+    
+    return result;
+  };
+
+  const handleViewEmailHistory = (conference: Conference) => {
+    setSelectedConference(conference);
+    setIsEmailHistoryOpen(true);
   };
 
   const handleRegenerateLink = (id: string) => {
@@ -171,6 +201,7 @@ export default function Conferences() {
                         <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => handleCopyLink(conference)}><LinkIcon className="mr-2 h-4 w-4" />Copiar Link</DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => handleViewEmailHistory(conference)}><Mail className="mr-2 h-4 w-4" />Histórico de Emails</DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem className="text-destructive" onClick={() => handleDelete(conference)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem>
                         </DropdownMenuContent>
@@ -187,6 +218,12 @@ export default function Conferences() {
       <ConferenceFormModal open={isFormModalOpen} onOpenChange={setIsFormModalOpen} conference={selectedConference} templates={templates} connections={connections} onSubmit={handleSubmit} />
       <ConferenceLinkModal open={isLinkModalOpen} onOpenChange={setIsLinkModalOpen} conference={createdConference} onResendEmail={handleResendEmail} onRegenerateLink={handleRegenerateLink} />
       <DeleteConferenceDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen} conference={selectedConference} onConfirm={handleConfirmDelete} />
+      <EmailHistoryModal 
+        open={isEmailHistoryOpen} 
+        onOpenChange={setIsEmailHistoryOpen} 
+        emailHistory={selectedConference?.emailHistory || []} 
+        conferenceName={selectedConference?.name || ''} 
+      />
     </div>
   );
 }

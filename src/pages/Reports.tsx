@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   BarChart,
   Bar,
@@ -12,25 +12,40 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts';
+import { format, startOfMonth, endOfMonth, isWithinInterval, parseISO } from 'date-fns';
+import { ptBR } from 'date-fns/locale';
 import { 
   Clock, 
   AlertTriangle, 
   TrendingUp, 
   Timer,
   Loader2,
-  BarChart3
+  BarChart3,
+  Filter,
+  X
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useConferences } from '@/hooks/useConferences';
 import { useTemplates } from '@/hooks/useTemplates';
+import { Conference } from '@/types';
 
 // Chart colors from CSS variables
 const CHART_COLORS = [
-  'hsl(217, 91%, 60%)',   // chart-1 (primary/blue)
-  'hsl(262, 83%, 58%)',   // chart-2 (purple)
-  'hsl(172, 66%, 50%)',   // chart-3 (teal)
-  'hsl(45, 93%, 47%)',    // chart-4 (yellow/warning)
-  'hsl(0, 84%, 60%)',     // chart-5 (red)
+  'hsl(217, 91%, 60%)',
+  'hsl(262, 83%, 58%)',
+  'hsl(172, 66%, 50%)',
+  'hsl(45, 93%, 47%)',
+  'hsl(0, 84%, 60%)',
 ];
 
 const STATUS_COLORS = {
@@ -48,10 +63,47 @@ const STATUS_LABELS = {
 };
 
 export default function Reports() {
-  const { allConferences, stats, isLoading: loadingConferences } = useConferences();
+  const { allConferences, isLoading: loadingConferences } = useConferences();
   const { allTemplates, isLoading: loadingTemplates } = useTemplates();
 
+  // Filter states
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [selectedTemplate, setSelectedTemplate] = useState<string>('all');
+
   const isLoading = loadingConferences || loadingTemplates;
+
+  // Apply filters to conferences
+  const filteredConferences = useMemo(() => {
+    return allConferences.filter((conference) => {
+      // Date filter
+      if (startDate || endDate) {
+        const conferenceDate = new Date(conference.createdAt);
+        if (startDate && conferenceDate < new Date(startDate)) return false;
+        if (endDate) {
+          const endOfDay = new Date(endDate);
+          endOfDay.setHours(23, 59, 59, 999);
+          if (conferenceDate > endOfDay) return false;
+        }
+      }
+
+      // Template filter
+      if (selectedTemplate !== 'all' && conference.templateId !== selectedTemplate) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [allConferences, startDate, endDate, selectedTemplate]);
+
+  // Calculate stats from filtered conferences
+  const stats = useMemo(() => ({
+    total: filteredConferences.length,
+    pending: filteredConferences.filter(c => c.status === 'pending').length,
+    inProgress: filteredConferences.filter(c => c.status === 'in_progress').length,
+    completed: filteredConferences.filter(c => c.status === 'completed').length,
+    divergent: filteredConferences.filter(c => c.status === 'divergent').length,
+  }), [filteredConferences]);
 
   // Status distribution data for pie chart
   const statusData = useMemo(() => {
@@ -67,11 +119,10 @@ export default function Reports() {
   const divergenceData = useMemo(() => {
     const divergenceCount: Record<string, { name: string; count: number }> = {};
 
-    allConferences.forEach((conference) => {
+    filteredConferences.forEach((conference) => {
       conference.items
         .filter((item) => item.status === 'divergent' || item.userResponse === 'divergent')
         .forEach((item) => {
-          // Find template item to get the name
           const template = allTemplates.find((t) => t.id === conference.templateId);
           const templateItem = template?.sections
             .flatMap((s) => s.items)
@@ -89,11 +140,11 @@ export default function Reports() {
     return Object.values(divergenceCount)
       .sort((a, b) => b.count - a.count)
       .slice(0, 5);
-  }, [allConferences, allTemplates]);
+  }, [filteredConferences, allTemplates]);
 
   // Average completion time
   const avgCompletionTime = useMemo(() => {
-    const completedConferences = allConferences.filter(
+    const completedConferences = filteredConferences.filter(
       (c) => c.status === 'completed' && c.completedAt
     );
 
@@ -110,13 +161,13 @@ export default function Reports() {
     const avgDays = Math.round(avgMs / (1000 * 60 * 60 * 24));
 
     return avgDays > 0 ? `${avgDays} dia${avgDays !== 1 ? 's' : ''}` : `${avgHours} hora${avgHours !== 1 ? 's' : ''}`;
-  }, [allConferences]);
+  }, [filteredConferences]);
 
   // Monthly conferences data for bar chart
   const monthlyData = useMemo(() => {
     const months: Record<string, { name: string; total: number; completed: number; divergent: number }> = {};
     
-    allConferences.forEach((conference) => {
+    filteredConferences.forEach((conference) => {
       const date = new Date(conference.createdAt);
       const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
       const monthName = date.toLocaleDateString('pt-BR', { month: 'short', year: '2-digit' });
@@ -134,7 +185,15 @@ export default function Reports() {
       .sort(([a], [b]) => a.localeCompare(b))
       .slice(-6)
       .map(([, data]) => data);
-  }, [allConferences]);
+  }, [filteredConferences]);
+
+  const clearFilters = () => {
+    setStartDate('');
+    setEndDate('');
+    setSelectedTemplate('all');
+  };
+
+  const hasActiveFilters = startDate || endDate || selectedTemplate !== 'all';
 
   if (isLoading) {
     return (
@@ -161,6 +220,67 @@ export default function Reports() {
           Análise de conferências, divergências e performance
         </p>
       </div>
+
+      {/* Filters */}
+      <Card>
+        <CardHeader className="pb-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Filter className="h-5 w-5 text-muted-foreground" />
+              <CardTitle className="text-lg">Filtros</CardTitle>
+            </div>
+            {hasActiveFilters && (
+              <Button variant="ghost" size="sm" onClick={clearFilters}>
+                <X className="h-4 w-4 mr-1" />
+                Limpar filtros
+              </Button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <div className="space-y-2">
+              <Label htmlFor="startDate">Data Inicial</Label>
+              <Input
+                id="startDate"
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="endDate">Data Final</Label>
+              <Input
+                id="endDate"
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="template">Template</Label>
+              <Select value={selectedTemplate} onValueChange={setSelectedTemplate}>
+                <SelectTrigger id="template">
+                  <SelectValue placeholder="Todos os templates" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Todos os templates</SelectItem>
+                  {allTemplates.map((template) => (
+                    <SelectItem key={template.id} value={template.id}>
+                      {template.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {hasActiveFilters && (
+            <p className="text-sm text-muted-foreground mt-3">
+              Mostrando {filteredConferences.length} de {allConferences.length} conferências
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Summary Cards */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

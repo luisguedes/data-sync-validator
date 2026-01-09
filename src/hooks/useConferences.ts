@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Conference, ConferenceStatus, ConferenceItem, ChecklistTemplate } from '@/types';
+import { Conference, ConferenceStatus, ConferenceItem, ChecklistTemplate, EmailHistoryEntry, EmailStatus } from '@/types';
 
 const STORAGE_KEY = 'app_conferences';
 
@@ -18,6 +18,7 @@ const initialConferences: Conference[] = [
     stores: [{ id: 's1', name: 'Loja Central', storeId: '001' }],
     expectedInputValues: {},
     items: [],
+    emailHistory: [],
     createdAt: new Date('2024-01-15'),
     updatedAt: new Date('2024-01-15'),
     createdBy: 'admin',
@@ -35,6 +36,16 @@ const initialConferences: Conference[] = [
     stores: [{ id: 's2', name: 'Filial Norte', storeId: '002' }],
     expectedInputValues: {},
     items: [],
+    emailHistory: [
+      {
+        id: 'e1',
+        type: 'conference_link',
+        to: 'maria@email.com',
+        subject: 'Link para Conferência: Validação Dados Financeiros',
+        status: 'sent',
+        sentAt: new Date('2024-01-14T10:30:00'),
+      }
+    ],
     createdAt: new Date('2024-01-14'),
     updatedAt: new Date('2024-01-16'),
     createdBy: 'admin',
@@ -52,6 +63,24 @@ const initialConferences: Conference[] = [
     stores: [{ id: 's3', name: 'Matriz', storeId: '000' }],
     expectedInputValues: {},
     items: [],
+    emailHistory: [
+      {
+        id: 'e2',
+        type: 'conference_link',
+        to: 'pedro@email.com',
+        subject: 'Link para Conferência: Conferência Estoque',
+        status: 'sent',
+        sentAt: new Date('2024-01-10T09:00:00'),
+      },
+      {
+        id: 'e3',
+        type: 'completion',
+        to: 'pedro@email.com',
+        subject: 'Conferência Concluída: Conferência Estoque',
+        status: 'sent',
+        sentAt: new Date('2024-01-12T16:45:00'),
+      }
+    ],
     createdAt: new Date('2024-01-10'),
     updatedAt: new Date('2024-01-12'),
     createdBy: 'admin',
@@ -70,6 +99,17 @@ const initialConferences: Conference[] = [
     stores: [{ id: 's4', name: 'Filial Norte', storeId: '002' }],
     expectedInputValues: {},
     items: [],
+    emailHistory: [
+      {
+        id: 'e4',
+        type: 'conference_link',
+        to: 'ana@email.com',
+        subject: 'Link para Conferência: Migração Filial Norte',
+        status: 'failed',
+        sentAt: new Date('2024-01-08T11:00:00'),
+        error: 'Erro de conexão com servidor SMTP',
+      }
+    ],
     createdAt: new Date('2024-01-08'),
     updatedAt: new Date('2024-01-10'),
     createdBy: 'admin',
@@ -164,6 +204,7 @@ export function useConferences() {
       stores: data.stores,
       expectedInputValues: data.expectedInputValues,
       items: generateItemsFromTemplate(template, data.stores),
+      emailHistory: [],
       createdAt: new Date(),
       updatedAt: new Date(),
       createdBy: 'admin',
@@ -299,6 +340,30 @@ export function useConferences() {
     return updated;
   }, [conferences, saveConferences]);
 
+  // Add email to history
+  const addEmailToHistory = useCallback((
+    conferenceId: string,
+    emailEntry: Omit<EmailHistoryEntry, 'id'>
+  ): Conference | null => {
+    const conference = conferences.find(c => c.id === conferenceId);
+    if (!conference) return null;
+
+    const entry: EmailHistoryEntry = {
+      ...emailEntry,
+      id: `email_${Date.now()}`,
+    };
+
+    const updated: Conference = {
+      ...conference,
+      emailHistory: [...(conference.emailHistory || []), entry],
+      updatedAt: new Date(),
+    };
+
+    const newConferences = conferences.map(c => c.id === conferenceId ? updated : c);
+    saveConferences(newConferences);
+    return updated;
+  }, [conferences, saveConferences]);
+
   // Copy link to clipboard
   const copyLink = useCallback((conference: Conference): string => {
     const link = `${window.location.origin}/client/${conference.linkToken}`;
@@ -348,5 +413,6 @@ export function useConferences() {
     executeQuery,
     regenerateLink,
     copyLink,
+    addEmailToHistory,
   };
 }
