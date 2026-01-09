@@ -5,8 +5,43 @@ const cors = require('cors');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { Pool, Client } = require('pg');
 
 const app = express();
+
+// ============================================
+// App Configuration Storage
+// ============================================
+const APP_CONFIG_FILE = process.env.APP_CONFIG_FILE || './app-config.json';
+let appConfig = {
+  isConfigured: false,
+  database: null,
+  smtp: null,
+  preferences: null,
+};
+
+const loadAppConfig = () => {
+  try {
+    if (fs.existsSync(APP_CONFIG_FILE)) {
+      const data = fs.readFileSync(APP_CONFIG_FILE, 'utf8');
+      appConfig = JSON.parse(data);
+      console.log('⚙️ App configuration loaded');
+    }
+  } catch (error) {
+    console.error('❌ Error loading app config:', error.message);
+  }
+};
+
+const saveAppConfig = () => {
+  try {
+    fs.writeFileSync(APP_CONFIG_FILE, JSON.stringify(appConfig, null, 2));
+    console.log('💾 App configuration saved');
+  } catch (error) {
+    console.error('❌ Error saving app config:', error.message);
+  }
+};
+
+loadAppConfig();
 
 // ============================================
 // JWT Configuration (local, no external dependencies)
@@ -2547,6 +2582,452 @@ app.put('/api/alerts/settings', (req, res) => {
     success: true,
     message: 'Configurações atualizadas',
     settings: alertNotificationSettings,
+  });
+});
+
+// ============================================
+// Setup Endpoints (Database Configuration)
+// ============================================
+
+// Get current app configuration status
+app.get('/api/setup/status', (req, res) => {
+  res.json({
+    success: true,
+    isConfigured: appConfig.isConfigured,
+    hasDatabase: !!appConfig.database,
+    hasSmtp: !!appConfig.smtp,
+    hasPreferences: !!appConfig.preferences,
+  });
+});
+
+// Test database connection
+app.post('/api/setup/test-database', async (req, res) => {
+  const { host, port, database, username, password } = req.body;
+  
+  if (!host || !port || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Host, porta e usuário são obrigatórios',
+    });
+  }
+  
+  // First, try to connect to 'postgres' database to check if server is reachable
+  const testClient = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database: 'postgres', // Connect to default database first
+    connectionTimeoutMillis: 10000,
+  });
+  
+  try {
+    await testClient.connect();
+    
+    // Check if the target database exists
+    const dbCheckResult = await testClient.query(
+      "SELECT 1 FROM pg_database WHERE datname = $1",
+      [database]
+    );
+    
+    await testClient.end();
+    
+    const databaseExists = dbCheckResult.rows.length > 0;
+    
+    res.json({
+      success: true,
+      message: databaseExists 
+        ? `Conexão estabelecida! Banco "${database}" encontrado.`
+        : `Conexão OK! Banco "${database}" não existe e será criado.`,
+      databaseExists,
+      serverVersion: 'PostgreSQL',
+    });
+  } catch (error) {
+    try { await testClient.end(); } catch {}
+    
+    let errorMessage = 'Falha ao conectar ao servidor PostgreSQL';
+    
+    if (error.code === 'ECONNREFUSED') {
+      errorMessage = `Servidor não encontrado em ${host}:${port}. Verifique se o PostgreSQL está rodando.`;
+    } else if (error.code === '28P01' || error.code === '28000') {
+      errorMessage = 'Usuário ou senha incorretos.';
+    } else if (error.code === 'ENOTFOUND') {
+      errorMessage = `Host "${host}" não encontrado. Verifique o endereço.`;
+    } else if (error.code === 'ETIMEDOUT') {
+      errorMessage = 'Tempo de conexão esgotado. Verifique firewall e rede.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
+    res.status(400).json({
+      success: false,
+      message: errorMessage,
+      code: error.code,
+    });
+  }
+});
+
+// Create database and import schema
+app.post('/api/setup/initialize-database', async (req, res) => {
+  const { host, port, database, username, password } = req.body;
+  
+  if (!host || !port || !database || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Todos os campos são obrigatórios',
+    });
+  }
+  
+  const adminClient = new Client({
+    host,
+    port: parseInt(port),
+    user: username,
+    password: password || '',
+    database: 'postgres',
+    connectionTimeoutMillis: 10000,
+  });
+  
+  try {
+    await adminClient.connect();
+    
+    // Check if database exists
+    const dbCheckResult = await adminClient.query(
+      "SELECT 1 FROM pg_database WHERE datname = $1",
+      [database]
+    );
+    
+    // Create database if it doesn't exist
+    if (dbCheckResult.rows.length === 0) {
+      console.log(`📦 Creating database "${database}"...`);
+      await adminClient.query(`CREATE DATABASE "${database}"`);
+      console.log(`✅ Database "${database}" created`);
+    }
+    
+    await adminClient.end();
+    
+    // Now connect to the new database and create schema
+    const appClient = new Client({
+      host,
+      port: parseInt(port),
+      user: username,
+      password: password || '',
+      database,
+      connectionTimeoutMillis: 10000,
+    });
+    
+    await appClient.connect();
+    
+    // Create the application schema
+    const schema = `
+      -- Enable UUID extension
+      CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+      
+      -- Users table (for app authentication)
+      CREATE TABLE IF NOT EXISTS app_users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        password_salt VARCHAR(255) NOT NULL,
+        role VARCHAR(50) NOT NULL DEFAULT 'viewer',
+        active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255)
+      );
+      
+      -- Database connections (client databases to validate)
+      CREATE TABLE IF NOT EXISTS db_connections (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(255) NOT NULL,
+        host VARCHAR(255) NOT NULL,
+        port INTEGER NOT NULL DEFAULT 5432,
+        database_name VARCHAR(255) NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        password_encrypted TEXT,
+        status VARCHAR(50) DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255)
+      );
+      
+      -- Conference templates
+      CREATE TABLE IF NOT EXISTS templates (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        version VARCHAR(50) DEFAULT '1.0.0',
+        expected_inputs JSONB DEFAULT '[]',
+        sections JSONB DEFAULT '[]',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255)
+      );
+      
+      -- Conferences
+      CREATE TABLE IF NOT EXISTS conferences (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(255) NOT NULL,
+        client_name VARCHAR(255) NOT NULL,
+        client_email VARCHAR(255) NOT NULL,
+        connection_id UUID REFERENCES db_connections(id),
+        template_id UUID REFERENCES templates(id),
+        status VARCHAR(50) DEFAULT 'pending',
+        link_token VARCHAR(255) UNIQUE NOT NULL,
+        link_expires_at TIMESTAMP WITH TIME ZONE,
+        stores JSONB DEFAULT '[]',
+        expected_input_values JSONB DEFAULT '{}',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255),
+        completed_at TIMESTAMP WITH TIME ZONE,
+        completed_by VARCHAR(255)
+      );
+      
+      -- Conference items (checklist items for each conference)
+      CREATE TABLE IF NOT EXISTS conference_items (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
+        template_item_id UUID,
+        status VARCHAR(50) DEFAULT 'pending',
+        query_result JSONB,
+        user_response VARCHAR(50),
+        observation TEXT,
+        attachments JSONB DEFAULT '[]',
+        executed_at TIMESTAMP WITH TIME ZONE,
+        responded_at TIMESTAMP WITH TIME ZONE,
+        responded_by VARCHAR(255)
+      );
+      
+      -- Email history
+      CREATE TABLE IF NOT EXISTS email_history (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        conference_id UUID REFERENCES conferences(id) ON DELETE CASCADE,
+        type VARCHAR(50) NOT NULL,
+        recipient VARCHAR(255) NOT NULL,
+        subject VARCHAR(500),
+        status VARCHAR(50) DEFAULT 'pending',
+        sent_at TIMESTAMP WITH TIME ZONE,
+        error TEXT
+      );
+      
+      -- Audit logs
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        action VARCHAR(100) NOT NULL,
+        user_id UUID,
+        user_email VARCHAR(255),
+        user_name VARCHAR(255),
+        ip_address VARCHAR(50),
+        user_agent TEXT,
+        details JSONB DEFAULT '{}',
+        success BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+      
+      -- API Keys
+      CREATE TABLE IF NOT EXISTS api_keys (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(255) NOT NULL,
+        key_hash VARCHAR(255) NOT NULL,
+        permission VARCHAR(50) DEFAULT 'readonly',
+        active BOOLEAN DEFAULT true,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        created_by VARCHAR(255),
+        last_used_at TIMESTAMP WITH TIME ZONE,
+        usage_count INTEGER DEFAULT 0
+      );
+      
+      -- Security alerts
+      CREATE TABLE IF NOT EXISTS security_alerts (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        type VARCHAR(100) NOT NULL,
+        severity VARCHAR(50) NOT NULL,
+        title VARCHAR(500) NOT NULL,
+        description TEXT,
+        details JSONB DEFAULT '{}',
+        acknowledged BOOLEAN DEFAULT false,
+        acknowledged_at TIMESTAMP WITH TIME ZONE,
+        acknowledged_by VARCHAR(255),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+      
+      -- App settings
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key VARCHAR(100) PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      );
+      
+      -- Create indexes for better performance
+      CREATE INDEX IF NOT EXISTS idx_conferences_status ON conferences(status);
+      CREATE INDEX IF NOT EXISTS idx_conferences_link_token ON conferences(link_token);
+      CREATE INDEX IF NOT EXISTS idx_conference_items_conference_id ON conference_items(conference_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_user_email ON audit_logs(user_email);
+      CREATE INDEX IF NOT EXISTS idx_security_alerts_created_at ON security_alerts(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_email_history_conference_id ON email_history(conference_id);
+    `;
+    
+    console.log('🔧 Creating schema...');
+    await appClient.query(schema);
+    console.log('✅ Schema created successfully');
+    
+    // Verify tables were created
+    const tablesResult = await appClient.query(`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      ORDER BY table_name
+    `);
+    
+    await appClient.end();
+    
+    const tables = tablesResult.rows.map(r => r.table_name);
+    
+    res.json({
+      success: true,
+      message: `Banco de dados "${database}" configurado com sucesso!`,
+      tables,
+      tablesCreated: tables.length,
+    });
+    
+  } catch (error) {
+    try { await adminClient.end(); } catch {}
+    
+    console.error('❌ Database initialization error:', error);
+    
+    let errorMessage = 'Erro ao inicializar o banco de dados';
+    
+    if (error.code === '42501') {
+      errorMessage = 'Permissão negada. O usuário não tem privilégios para criar banco de dados.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
+    res.status(400).json({
+      success: false,
+      message: errorMessage,
+      code: error.code,
+    });
+  }
+});
+
+// Save database configuration
+app.post('/api/setup/save-database', (req, res) => {
+  const { host, port, database, username, password } = req.body;
+  
+  appConfig.database = { host, port, database, username, password };
+  saveAppConfig();
+  
+  res.json({
+    success: true,
+    message: 'Configuração do banco de dados salva',
+  });
+});
+
+// Save SMTP configuration
+app.post('/api/setup/save-smtp', (req, res) => {
+  const { host, port, username, password, fromEmail, fromName } = req.body;
+  
+  appConfig.smtp = { host, port, username, password, fromEmail, fromName };
+  saveAppConfig();
+  
+  res.json({
+    success: true,
+    message: 'Configuração SMTP salva',
+  });
+});
+
+// Test SMTP connection
+app.post('/api/setup/test-smtp', async (req, res) => {
+  const { host, port, username, password, fromEmail } = req.body;
+  
+  if (!host || !port || !fromEmail) {
+    return res.status(400).json({
+      success: false,
+      message: 'Host, porta e email remetente são obrigatórios',
+    });
+  }
+  
+  const testTransporter = nodemailer.createTransport({
+    host,
+    port: parseInt(port),
+    secure: parseInt(port) === 465,
+    auth: username ? { user: username, pass: password } : undefined,
+    connectionTimeout: 10000,
+  });
+  
+  try {
+    await testTransporter.verify();
+    
+    res.json({
+      success: true,
+      message: 'Conexão SMTP estabelecida com sucesso!',
+    });
+  } catch (error) {
+    let errorMessage = 'Falha ao conectar ao servidor SMTP';
+    
+    if (error.code === 'ECONNREFUSED') {
+      errorMessage = `Servidor SMTP não encontrado em ${host}:${port}`;
+    } else if (error.code === 'EAUTH') {
+      errorMessage = 'Autenticação falhou. Verifique usuário e senha.';
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+    
+    res.status(400).json({
+      success: false,
+      message: errorMessage,
+    });
+  } finally {
+    testTransporter.close();
+  }
+});
+
+// Save preferences
+app.post('/api/setup/save-preferences', (req, res) => {
+  const { companyName, theme, timezone, backendUrl, emailNotifications } = req.body;
+  
+  appConfig.preferences = { companyName, theme, timezone, backendUrl, emailNotifications };
+  saveAppConfig();
+  
+  res.json({
+    success: true,
+    message: 'Preferências salvas',
+  });
+});
+
+// Complete setup
+app.post('/api/setup/complete', (req, res) => {
+  appConfig.isConfigured = true;
+  saveAppConfig();
+  
+  res.json({
+    success: true,
+    message: 'Configuração concluída!',
+  });
+});
+
+// Get full configuration (for settings page)
+app.get('/api/setup/config', (req, res) => {
+  // Don't expose passwords
+  const safeConfig = {
+    isConfigured: appConfig.isConfigured,
+    database: appConfig.database ? {
+      ...appConfig.database,
+      password: appConfig.database.password ? '********' : '',
+    } : null,
+    smtp: appConfig.smtp ? {
+      ...appConfig.smtp,
+      password: appConfig.smtp.password ? '********' : '',
+    } : null,
+    preferences: appConfig.preferences,
+  };
+  
+  res.json({
+    success: true,
+    config: safeConfig,
   });
 });
 

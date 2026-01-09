@@ -4,12 +4,16 @@ import type { AppSettings, DatabaseConfig, SmtpConfig, AppPreferences } from '@/
 interface AppSettingsContextType {
   settings: AppSettings;
   isLoading: boolean;
+  backendUrl: string;
+  setBackendUrl: (url: string) => void;
   updateDatabaseConfig: (config: DatabaseConfig) => Promise<boolean>;
   updateSmtpConfig: (config: SmtpConfig) => Promise<boolean>;
   updatePreferences: (prefs: AppPreferences) => Promise<boolean>;
-  completeSetup: () => void;
-  testDatabaseConnection: (config: DatabaseConfig) => Promise<{ success: boolean; message: string }>;
+  completeSetup: () => Promise<void>;
+  testDatabaseConnection: (config: DatabaseConfig) => Promise<{ success: boolean; message: string; databaseExists?: boolean }>;
   testSmtpConnection: (config: SmtpConfig) => Promise<{ success: boolean; message: string }>;
+  initializeDatabase: (config: DatabaseConfig) => Promise<{ success: boolean; message: string; tables?: string[] }>;
+  refreshSettings: () => Promise<void>;
 }
 
 const AppSettingsContext = createContext<AppSettingsContextType | undefined>(undefined);
@@ -21,70 +25,198 @@ const defaultSettings: AppSettings = {
   preferences: null,
 };
 
+// Get backend URL from localStorage or use default
+const getStoredBackendUrl = () => {
+  const stored = localStorage.getItem('backend_url');
+  return stored || 'http://localhost:3001';
+};
+
 export function AppSettingsProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [isLoading, setIsLoading] = useState(true);
+  const [backendUrl, setBackendUrlState] = useState(getStoredBackendUrl);
 
-  useEffect(() => {
-    // Load settings from localStorage (in production, this would be from the backend)
-    const stored = localStorage.getItem('app_settings');
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        setSettings(parsed);
-      } catch {
-        setSettings(defaultSettings);
+  const setBackendUrl = (url: string) => {
+    localStorage.setItem('backend_url', url);
+    setBackendUrlState(url);
+  };
+
+  const fetchSettings = async () => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/status`);
+      if (response.ok) {
+        const data = await response.json();
+        setSettings(prev => ({
+          ...prev,
+          isConfigured: data.isConfigured,
+        }));
+      }
+    } catch (error) {
+      console.log('Backend not available, using local settings');
+      // Fallback to localStorage
+      const stored = localStorage.getItem('app_settings');
+      if (stored) {
+        try {
+          setSettings(JSON.parse(stored));
+        } catch {
+          setSettings(defaultSettings);
+        }
       }
     }
-    setIsLoading(false);
-  }, []);
+  };
 
-  const saveSettings = (newSettings: AppSettings) => {
+  useEffect(() => {
+    fetchSettings().finally(() => setIsLoading(false));
+  }, [backendUrl]);
+
+  const refreshSettings = async () => {
+    setIsLoading(true);
+    await fetchSettings();
+    setIsLoading(false);
+  };
+
+  const updateDatabaseConfig = async (config: DatabaseConfig): Promise<boolean> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/save-database`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      
+      if (response.ok) {
+        setSettings(prev => ({ ...prev, database: config }));
+        return true;
+      }
+      return false;
+    } catch (error) {
+      // Fallback to localStorage
+      const newSettings = { ...settings, database: config };
+      localStorage.setItem('app_settings', JSON.stringify(newSettings));
+      setSettings(newSettings);
+      return true;
+    }
+  };
+
+  const updateSmtpConfig = async (config: SmtpConfig): Promise<boolean> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/save-smtp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      
+      if (response.ok) {
+        setSettings(prev => ({ ...prev, smtp: config }));
+        return true;
+      }
+      return false;
+    } catch (error) {
+      const newSettings = { ...settings, smtp: config };
+      localStorage.setItem('app_settings', JSON.stringify(newSettings));
+      setSettings(newSettings);
+      return true;
+    }
+  };
+
+  const updatePreferences = async (prefs: AppPreferences): Promise<boolean> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/save-preferences`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prefs),
+      });
+      
+      if (response.ok) {
+        setSettings(prev => ({ ...prev, preferences: prefs }));
+        return true;
+      }
+      return false;
+    } catch (error) {
+      const newSettings = { ...settings, preferences: prefs };
+      localStorage.setItem('app_settings', JSON.stringify(newSettings));
+      setSettings(newSettings);
+      return true;
+    }
+  };
+
+  const completeSetup = async () => {
+    try {
+      await fetch(`${backendUrl}/api/setup/complete`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch (error) {
+      console.log('Backend not available for complete setup');
+    }
+    
+    const newSettings = { ...settings, isConfigured: true };
     localStorage.setItem('app_settings', JSON.stringify(newSettings));
     setSettings(newSettings);
   };
 
-  const updateDatabaseConfig = async (config: DatabaseConfig): Promise<boolean> => {
-    const newSettings = { ...settings, database: config };
-    saveSettings(newSettings);
-    return true;
-  };
-
-  const updateSmtpConfig = async (config: SmtpConfig): Promise<boolean> => {
-    const newSettings = { ...settings, smtp: config };
-    saveSettings(newSettings);
-    return true;
-  };
-
-  const updatePreferences = async (prefs: AppPreferences): Promise<boolean> => {
-    const newSettings = { ...settings, preferences: prefs };
-    saveSettings(newSettings);
-    return true;
-  };
-
-  const completeSetup = () => {
-    const newSettings = { ...settings, isConfigured: true };
-    saveSettings(newSettings);
-  };
-
-  const testDatabaseConnection = async (config: DatabaseConfig): Promise<{ success: boolean; message: string }> => {
-    // Mock test - in production, this would actually test the connection
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    if (config.host && config.port && config.database && config.username) {
-      return { success: true, message: 'Conexão estabelecida com sucesso!' };
+  const testDatabaseConnection = async (config: DatabaseConfig): Promise<{ success: boolean; message: string; databaseExists?: boolean }> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/test-database`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      
+      const data = await response.json();
+      return {
+        success: data.success,
+        message: data.message,
+        databaseExists: data.databaseExists,
+      };
+    } catch (error) {
+      return { 
+        success: false, 
+        message: 'Não foi possível conectar ao backend. Verifique se o servidor está rodando.' 
+      };
     }
-    return { success: false, message: 'Falha ao conectar. Verifique as credenciais.' };
   };
 
   const testSmtpConnection = async (config: SmtpConfig): Promise<{ success: boolean; message: string }> => {
-    // Mock test - in production, this would actually test the SMTP connection
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    if (config.host && config.port && config.fromEmail) {
-      return { success: true, message: 'Email de teste enviado com sucesso!' };
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/test-smtp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      
+      const data = await response.json();
+      return {
+        success: data.success,
+        message: data.message,
+      };
+    } catch (error) {
+      return { 
+        success: false, 
+        message: 'Não foi possível conectar ao backend. Verifique se o servidor está rodando.' 
+      };
     }
-    return { success: false, message: 'Falha ao conectar ao servidor SMTP.' };
+  };
+
+  const initializeDatabase = async (config: DatabaseConfig): Promise<{ success: boolean; message: string; tables?: string[] }> => {
+    try {
+      const response = await fetch(`${backendUrl}/api/setup/initialize-database`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(config),
+      });
+      
+      const data = await response.json();
+      return {
+        success: data.success,
+        message: data.message,
+        tables: data.tables,
+      };
+    } catch (error) {
+      return { 
+        success: false, 
+        message: 'Não foi possível conectar ao backend. Verifique se o servidor está rodando.' 
+      };
+    }
   };
 
   return (
@@ -92,12 +224,16 @@ export function AppSettingsProvider({ children }: { children: ReactNode }) {
       value={{
         settings,
         isLoading,
+        backendUrl,
+        setBackendUrl,
         updateDatabaseConfig,
         updateSmtpConfig,
         updatePreferences,
         completeSetup,
         testDatabaseConnection,
         testSmtpConnection,
+        initializeDatabase,
+        refreshSettings,
       }}
     >
       {children}
