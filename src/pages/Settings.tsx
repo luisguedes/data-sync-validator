@@ -23,12 +23,14 @@ import {
   Key,
   Users,
   FileText,
+  Shield,
 } from 'lucide-react';
 import type { AppPreferences } from '@/types';
 import { ReminderSettings } from '@/components/settings/ReminderSettings';
 import { ApiKeyManager } from '@/components/settings/ApiKeyManager';
 import { UserManager } from '@/components/settings/UserManager';
 import { AuditLogViewer } from '@/components/settings/AuditLogViewer';
+import { SecurityAlerts } from '@/components/settings/SecurityAlerts';
 
 export default function Settings() {
   const { user } = useAuth();
@@ -152,6 +154,12 @@ export default function Settings() {
             <TabsTrigger value="users" className="flex items-center gap-2">
               <Users className="h-4 w-4" />
               Usuários
+            </TabsTrigger>
+          )}
+          {user?.role === 'admin' && (
+            <TabsTrigger value="security-alerts" className="flex items-center gap-2">
+              <Shield className="h-4 w-4" />
+              Alertas
             </TabsTrigger>
           )}
           {user?.role === 'admin' && (
@@ -320,6 +328,12 @@ export default function Settings() {
         {user?.role === 'admin' && (
           <TabsContent value="users">
             <UserManager backendUrl={preferences.backendUrl || ''} />
+          </TabsContent>
+        )}
+
+        {user?.role === 'admin' && (
+          <TabsContent value="security-alerts">
+            <SecurityAlerts backendUrl={preferences.backendUrl || ''} />
           </TabsContent>
         )}
 
